@@ -2531,7 +2531,7 @@ def load_config(env_name, config_dir=None):
 
 
 def main():
-    err = "Usage: puffer [train, eval, sweep, controlled_exp, autotune, profile] [env_name] [optional args]. --help for more info"
+    err = "Usage: puffer [train, fasttd3, eval, sweep, controlled_exp, autotune, profile] [env_name] [optional args]. --help for more info"
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
 
@@ -2539,6 +2539,12 @@ def main():
     env_name = sys.argv.pop(1)
     if mode == "train":
         train(env_name=env_name)
+    elif mode == "fasttd3":
+        if env_name != "puffer_drive":
+            raise pufferlib.APIUsageError("FastTD3 currently supports puffer_drive only")
+        from pufferlib.fast_td3_train import train as train_fast_td3
+
+        train_fast_td3(env_name=env_name)
     elif mode == "eval":
         if len(sys.argv) < 2:
             raise pufferlib.APIUsageError("Usage: puffer eval [env_name] [benchmark_name] [optional args]")

@@ -227,6 +227,7 @@ if not NO_TRAIN:
         "wandb",
         "wandb-workspaces",
         "tensorboard",
+        "tensordict",
         "jupytext",
         "torchinfo",
         "ipywidgets",

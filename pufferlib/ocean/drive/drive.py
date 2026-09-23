@@ -89,6 +89,7 @@ class Drive(pufferlib.PufferEnv):
         reward_randomization=False,
         reward_log_sampling=False,
         compute_eval_metrics=True,
+        capture_final_observations=False,
         shared_network=True,
         obs_slots_lane_n=32,
         obs_slots_boundary_n=32,
@@ -131,6 +132,7 @@ class Drive(pufferlib.PufferEnv):
         self.reward_randomization = reward_randomization
         self.reward_log_sampling = reward_log_sampling
         self.compute_eval_metrics = compute_eval_metrics
+        self.capture_final_observations = capture_final_observations
         self.shared_network = shared_network
         self.num_maps = num_maps
         self.report_interval = report_interval
@@ -388,6 +390,9 @@ class Drive(pufferlib.PufferEnv):
         self.map_ids = map_ids
         self.num_envs = num_envs
         super().__init__(buf=buf)
+        self.final_observations = (
+            np.empty_like(self.observations) if capture_final_observations else None
+        )
         env_ids = []
         for i in range(num_envs):
             cur = agent_offsets[i]
@@ -401,6 +406,7 @@ class Drive(pufferlib.PufferEnv):
                 self.truncations[cur:nxt],
                 self.masks[cur:nxt],
                 env_seed,
+                final_observations=self.final_observations[cur:nxt] if self.capture_final_observations else None,
                 **self._env_init_kwargs(self.map_files[map_ids[i]], nxt - cur),
             )
             env_ids.append(env_id)
@@ -547,6 +553,8 @@ class Drive(pufferlib.PufferEnv):
             binding.vec_reset(self.c_envs)
         self.tick = 0
         self.truncations[:] = 0
+        if self.capture_final_observations:
+            self.terminals[:] = 0
         if self.capture_replay:
             self._initialize_replay_captures()
         return self.observations, []
@@ -562,6 +570,14 @@ class Drive(pufferlib.PufferEnv):
         self.actions[:] = actions
         binding.vec_step(self.c_envs)
         self.tick += 1
+        transition = None
+        if self.capture_final_observations:
+            indices = np.flatnonzero(self.truncations)
+            transition = {
+                "count": self.num_agents,
+                "indices": indices,
+                "observations": self.final_observations[indices].copy(),
+            }
         info = []
         # vec_log is the training aggregate; it resets env->log, which eval reads
         # per episode, so it must not run in eval mode.
@@ -585,6 +601,11 @@ class Drive(pufferlib.PufferEnv):
                 if self.current_num_eval_scenarios == 0:
                     self._eval_exhausted = True
                     return (self.observations, self.rewards, self.terminals, self.truncations, info)
+                if transition is not None:
+                    final_obs = self.observations.copy()
+                    final_obs[transition["indices"]] = transition["observations"]
+                    transition["indices"] = np.arange(self.num_agents)
+                    transition["observations"] = final_obs
                 binding.vec_close(self.c_envs)
                 # Pairs already replayed this sweep; slice the rest so a deferred
                 # scene resumes exactly where the previous batch stopped.
@@ -635,6 +656,7 @@ class Drive(pufferlib.PufferEnv):
                         self.truncations[cur:nxt],
                         self.masks[cur:nxt],
                         env_seed,
+                        final_observations=self.final_observations[cur:nxt] if self.capture_final_observations else None,
                         **self._env_init_kwargs(self.map_files[map_ids[i]], nxt - cur),
                     )
                     env_ids.append(env_id)
@@ -645,6 +667,8 @@ class Drive(pufferlib.PufferEnv):
                     self._initialize_replay_captures()
                 # Map resampling is an external reset boundary (dataset/map switch). Treat as truncation.
                 self.truncations[:] = 1
+        if transition is not None:
+            info.append({"_fasttd3_transition": transition})
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def get_global_agent_state(self):

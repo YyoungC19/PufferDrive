@@ -278,6 +278,49 @@ train:
   adv_filter_enabled: true
   adv_filter_ewma_beta: 0.25
   adv_filter_threshold_scale: 0.01
+fast_td3:
+  agent: fasttd3
+  total_timesteps: 20000000000
+  torch_deterministic: true
+  critic_learning_rate: 0.0003
+  actor_learning_rate: 0.0003
+  critic_learning_rate_end: 0.0003
+  actor_learning_rate_end: 0.0003
+  buffer_size: 512
+  num_steps: 1
+  gamma: 0.99
+  tau: 0.1
+  batch_size: 32768
+  policy_noise: 0.001
+  std_min: 0.001
+  std_max: 0.4
+  learning_starts: 10
+  policy_frequency: 2
+  noise_clip: 0.5
+  num_updates: 2
+  init_scale: 0.01
+  num_atoms: 101
+  v_min: -250.0
+  v_max: 250.0
+  critic_hidden_dim: 1024
+  actor_hidden_dim: 512
+  use_cdq: true
+  measure_burnin: 3
+  compile: true
+  compile_mode: reduce-overhead
+  obs_normalization: true
+  reward_normalization: false
+  use_grad_norm_clipping: false
+  max_grad_norm: 0.0
+  amp: true
+  amp_dtype: bf16
+  disable_bootstrap: false
+  weight_decay: 0.1
+  sim_type: ""
+  sim_dimension: 64
+  critic_seq_len: 8
+  actor_seq_len: 8
+  save_interval: 5000
 sweep:
   method: Protein
   metric: score

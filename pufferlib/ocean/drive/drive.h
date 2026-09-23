@@ -145,6 +145,7 @@ struct Drive {
     float *rewards;
     unsigned char *terminals;
     unsigned char *truncations;
+    float *final_observations;
     unsigned char *masks;
     // Agents
     Agent *agents;
@@ -4655,6 +4656,14 @@ void c_step(Drive *env) {
         if (env->eval_mode) {
             env->eval_episode_done = 1;
             return;
+        }
+        if (env->final_observations) {
+            float *observations = env->observations;
+            Rng rng_state = env->rng_state;
+            env->observations = env->final_observations;
+            compute_observations(env);
+            env->observations = observations;
+            env->rng_state = rng_state;
         }
         c_reset(env);
         return;

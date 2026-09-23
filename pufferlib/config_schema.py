@@ -470,6 +470,7 @@ class PufferDriveConfig:
     sweep: dict = MISSING
     eval: EvaluationConfig | None = None
     controlled_exp: dict = MISSING
+    fast_td3: dict | None = None
 
     # Known runtime metadata/options are optional and are not materialized in
     # the caller's plain dictionary when absent.
