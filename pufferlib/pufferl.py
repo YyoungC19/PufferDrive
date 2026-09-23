@@ -2259,25 +2259,31 @@ def _run_eval_rollout(
                     policy_obs_tensor[:agents_per_batch].copy_(environment_obs_tensor)
                 else:
                     policy_obs_tensor = environment_obs_tensor
-                if recurrent_state is None:
-                    logits, value = policy_forward_eval(policy_obs_tensor)
-                else:
-                    logits, value = policy_forward_eval(policy_obs_tensor, recurrent_state)
-                action, logprob, entropy, cont_action = eval_sample_logits(
-                    logits,
-                    action_selection=action_selection,
-                    env_continuous=env_continuous,
-                    policy=uncompiled_policy,
-                )
-                if discrete_policy_on_continuous_env:
-                    # raw_action stays the discrete class (what the replay logs record),
-                    # while the env is stepped with its continuous counterpart.
-                    raw_action = action[:agents_per_batch].cpu().numpy()
-                    continuous_actions = cont_action.reshape(-1, *vecenv.single_action_space.shape)
-                    action = continuous_actions[:agents_per_batch].float().cpu().numpy()
-                else:
-                    raw_action = action[:agents_per_batch].cpu().numpy().reshape(vecenv.action_space.shape)
+                if getattr(uncompiled_policy, "is_deterministic", False):
+                    raw_action = policy_forward_eval(policy_obs_tensor)[:agents_per_batch].float().cpu().numpy()
+                    raw_action = raw_action.reshape(vecenv.action_space.shape)
                     action = raw_action
+                    logits = value = logprob = entropy = None
+                else:
+                    if recurrent_state is None:
+                        logits, value = policy_forward_eval(policy_obs_tensor)
+                    else:
+                        logits, value = policy_forward_eval(policy_obs_tensor, recurrent_state)
+                    action, logprob, entropy, cont_action = eval_sample_logits(
+                        logits,
+                        action_selection=action_selection,
+                        env_continuous=env_continuous,
+                        policy=uncompiled_policy,
+                    )
+                    if discrete_policy_on_continuous_env:
+                        # raw_action stays the discrete class (what the replay logs record),
+                        # while the env is stepped with its continuous counterpart.
+                        raw_action = action[:agents_per_batch].cpu().numpy()
+                        continuous_actions = cont_action.reshape(-1, *vecenv.single_action_space.shape)
+                        action = continuous_actions[:agents_per_batch].float().cpu().numpy()
+                    else:
+                        raw_action = action[:agents_per_batch].cpu().numpy().reshape(vecenv.action_space.shape)
+                        action = raw_action
             if env_continuous:
                 action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
             _require_finite_eval_batch(action, "policy actions", num_workers, worker_env_kwargs)
@@ -2500,6 +2506,10 @@ def load_policy(args, vecenv, env_name=""):
 
     if load_path is not None:
         state_dict = torch.load(load_path, map_location=device)
+        if "actor_state_dict" in state_dict:
+            from pufferlib.fast_td3_eval import FastTD3EvalPolicy
+
+            return FastTD3EvalPolicy(state_dict, vecenv, device).to(device)
         policy.load_state_dict(clean_policy_state_dict(state_dict))
         # state_path = os.path.join(*load_path.split('/')[:-1], 'state.pt')
         # optim_state = torch.load(state_path)['optimizer_state_dict']

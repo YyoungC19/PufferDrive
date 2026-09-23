@@ -142,6 +142,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         WandbLogger,
         load_config,
         load_env,
+        _save_experiment_config,
     )
 
     full_args = args or load_config(env_name)
@@ -159,7 +160,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     args.cuda = cuda
     args.device_rank = device_rank
     args.checkpoint_path = full_args.get("load_model_path")
-    args.eval_interval = full_args.get("eval", {}).get("eval_interval", 0)
 
     if logger is None:
         if full_args.get("neptune"):
@@ -203,6 +203,9 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     print(f"Using device: {device}")
 
     env_type = "puffer_drive"
+    obs_stats_feature_idx = torch.as_tensor(
+        np.flatnonzero(vecenv.driver_env.obs_stats_feature_mask), device=device
+    )
     envs = PufferDriveEnv(vecenv, device, args.seed)
 
     n_act = envs.num_actions
@@ -397,41 +400,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     policy_noise = args.policy_noise
     noise_clip = args.noise_clip
 
-    def evaluate():
-        from pufferlib.ocean.benchmark.evaluator import Evaluator
-
-        evaluator = Evaluator(full_args, logger)
-
-        if full_args["eval"]["human_replay_eval"]:
-            evaluator.hr_env = load_env("puffer_drive", evaluator.hr_eval_config)
-            try:
-                evaluator.rollout(
-                    actor,
-                    mode="human_replay",
-                    obs_normalizer=obs_normalizer,
-                )
-            except Exception as error:
-                print(f"Render failed (non-fatal): {error}")
-            evaluator.hr_env.driver_env.stop_recorder(0)
-            evaluator.hr_env.close()
-            evaluator.log_videos(eval_mode="human_replay", epoch=global_step)
-
-        if full_args["eval"]["self_play_eval"]:
-            evaluator.sp_env = load_env("puffer_drive", evaluator.sp_eval_config)
-            try:
-                evaluator.rollout(
-                    actor,
-                    mode="self_play",
-                    obs_normalizer=obs_normalizer,
-                )
-            except Exception as error:
-                print(f"Render failed (non-fatal): {error}")
-            evaluator.sp_env.driver_env.stop_recorder(0)
-            evaluator.sp_env.close()
-            evaluator.log_videos(eval_mode="self_play", epoch=global_step)
-
-        return evaluator.collect_stats()
-
     def update_main(data, logs_dict):
         with autocast(
             device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
@@ -612,6 +580,9 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     env_stats = defaultdict(list)
     run_start = time.time()
     model_dir = os.path.join(args.data_dir, f"{env_name}_{logger.run_id}")
+    checkpoint_config = {**full_args, "env": {**full_args["env"]}}
+    checkpoint_config["env"].pop("capture_final_observations", None)
+    _save_experiment_config(checkpoint_config, model_dir)
 
     def checkpoint_path(step):
         return os.path.join(model_dir, f"model_{env_name}_{step:06d}.pt")
@@ -642,6 +613,10 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
             noise_scales_by_id[current_ids] = actor_detach.noise_scales
 
         next_obs, rewards, dones, infos = envs.step(actions.float())
+        obs_stat_source = next_obs[..., obs_stats_feature_idx]
+        env_stats["obs/max"].append(obs_stat_source.max().item())
+        env_stats["obs/min"].append(obs_stat_source.min().item())
+        env_stats["obs/mean"].append(obs_stat_source.mean().item())
         for item in infos["env_infos"]:
             for key, value in pufferlib.unroll_nested_dict(item):
                 if isinstance(value, np.ndarray):
@@ -750,11 +725,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
                         )
                     }
 
-                    eval_logs = {}
-                    if args.eval_interval > 0 and global_step % args.eval_interval == 0:
-                        print(f"Evaluating at global step {global_step}")
-                        eval_logs = evaluate()
-
                 agent_steps = (global_step + 1) * args.num_envs
                 logs = {
                     "SPS": speed * args.num_envs,
@@ -764,7 +734,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
                     "learning_rate/actor": float(actor_scheduler.get_last_lr()[0]),
                     **{f"environment/{key}": value for key, value in pufferlib.utils.reduce_environment_metrics(env_stats).items()},
                     **{f"losses/{key}": value for key, value in losses.items()},
-                    **eval_logs,
                 }
                 env_stats.clear()
                 logger.log(logs, step=agent_steps)

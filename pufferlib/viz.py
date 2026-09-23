@@ -879,9 +879,10 @@ def encode_interactive_replay(scenario, replay):
         "traffic_i16": replay["traffic_i16"].astype(np.int16, copy=False),
         "raw_action": replay["raw_action"].astype(np.float32, copy=False),
         "clipped_action": replay["clipped_action"].astype(np.float32, copy=False),
-        "value": replay["value"].astype(np.float32, copy=False),
-        "entropy": replay["entropy"].astype(np.float32, copy=False),
     }
+    for policy_key in ("value", "entropy"):
+        if replay.get(policy_key) is not None:
+            chunks[policy_key] = replay[policy_key].astype(np.float32, copy=False)
     if replay.get("goals_f32") is not None:
         chunks["goals_f32"] = replay["goals_f32"].astype(np.float32, copy=False)
     if replay.get("rewards_f32") is not None:
@@ -1503,7 +1504,9 @@ self.onmessage = async event => {
             cg.innerHTML = C.coefs_f32 ? coefLabels.map(l=>`<div class="item"><span class="name">${l}</span><span class="num">-</span></div>`).join('') : '';
             document.getElementById('coef-header').style.display = C.coefs_f32 ? '' : 'none';
             const pol = document.getElementById('policy-grid');
-            let html = '<div class="item"><span class="name">value</span><span class="num" data-pol="v">-</span></div><div class="item"><span class="name">entropy</span><span class="num" data-pol="e">-</span></div>';
+            let html = '';
+            if (C.value) html += '<div class="item"><span class="name">value</span><span class="num" data-pol="v">-</span></div>';
+            if (C.entropy) html += '<div class="item"><span class="name">entropy</span><span class="num" data-pol="e">-</span></div>';
             let labels = [];
             if (discrete) {
                 // Probability heatmap over the 2D action grid (rows x cols), index i = row * cols.length + col.
@@ -1533,8 +1536,8 @@ self.onmessage = async event => {
         function updatePolicy(frame, agent) {
             if (agent.slot < 0) return;
             const s = frame * H.active_count + agent.slot;
-            refs.polV.textContent = C.value[s].toFixed(3);
-            refs.polE.textContent = C.entropy[s].toFixed(3);
+            if (refs.polV) refs.polV.textContent = C.value[s].toFixed(3);
+            if (refs.polE) refs.polE.textContent = C.entropy[s].toFixed(3);
             const ab = s * refs.actionDims;
             if (refs.discrete) {
                 const n = refs.heat.length, pb = s * n, selected = Math.round(C.raw_action[ab]);

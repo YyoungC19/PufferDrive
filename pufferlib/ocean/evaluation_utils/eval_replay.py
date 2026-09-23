@@ -80,9 +80,10 @@ class EvalReplayCapture:
         replay_frame = {
             "raw_action": np.asarray(raw_action, dtype=np.float32),
             "clipped_action": np.asarray(action, dtype=np.float32),
-            "value": value[: self.agents_per_batch].detach().reshape(-1).float().cpu().numpy(),
-            "entropy": entropy[: self.agents_per_batch].detach().reshape(-1).float().cpu().numpy(),
         }
+        if value is not None:
+            replay_frame["value"] = value[: self.agents_per_batch].detach().reshape(-1).float().cpu().numpy()
+            replay_frame["entropy"] = entropy[: self.agents_per_batch].detach().reshape(-1).float().cpu().numpy()
         if self.capture_observations:
             replay_frame["obs"] = np.asarray(obs, dtype=np.float16)
         if isinstance(logits, torch.distributions.Normal):
@@ -91,7 +92,7 @@ class EvalReplayCapture:
             replay_frame["policy_log_prob"] = (
                 logprob[: self.agents_per_batch].detach().reshape(-1).float().cpu().numpy()
             )
-        else:
+        elif logits is not None:
             discrete_logits = logits if isinstance(logits, torch.Tensor) else logits[0]
             replay_frame["policy_probs"] = (
                 torch.softmax(discrete_logits[: self.agents_per_batch], dim=-1).detach().float().cpu().numpy()
