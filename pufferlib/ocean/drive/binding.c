@@ -1974,6 +1974,9 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_timestep = (float) unpack(kwargs, "reward_timestep");
     env->reward_overspeed = (float) unpack(kwargs, "reward_overspeed");
     env->reward_ade = (float) unpack(kwargs, "reward_ade");
+    env->reward_type = (int) unpack(kwargs, "reward_type");
+    env->carl_terminal_hint = (float) unpack(kwargs, "carl_terminal_hint");
+    env->carl_max_overspeed = (float) unpack(kwargs, "carl_max_overspeed");
     env->collision_behavior = (int) unpack(kwargs, "collision_behavior");
     env->offroad_behavior = (int) unpack(kwargs, "offroad_behavior");
     env->traffic_light_behavior = (int) unpack(kwargs, "traffic_light_behavior");
@@ -2158,6 +2161,9 @@ static int my_log(PyObject *dict, Env *env, Log *log, float n) {
     assign_to_dict(dict, "reward_components/red_light", log->reward_red_light);
     assign_to_dict(dict, "reward_components/stop_sign", log->reward_stop_sign);
     assign_to_dict(dict, "reward_components/goal", log->reward_goal);
+    assign_to_dict(dict, "reward_components/route_progress", log->reward_route_progress);
+    assign_to_dict(dict, "reward_components/carl_terminal", log->reward_carl_terminal);
+    assign_to_dict(dict, "route_completion", log->route_completion);
     assign_to_dict(dict, "reward_components/lane_align", log->reward_lane_align);
     assign_to_dict(dict, "reward_components/lane_center", log->reward_lane_center);
     assign_to_dict(dict, "reward_components/comfort", log->reward_comfort);

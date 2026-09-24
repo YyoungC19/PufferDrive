@@ -253,6 +253,9 @@ static const int ROAD_OFFSETS[25][2]
 #define REWARD_COEF_SPEED 17
 #define NUM_REWARD_COEFS 18
 
+#define REWARD_TYPE_PUFFER 0
+#define REWARD_TYPE_CARL 1
+
 // =====================================================================================
 // 10. METRICS & SCORING
 // =====================================================================================
