@@ -300,6 +300,9 @@ class DriveEnvConfig:
     reward_timestep: float = _constrained_field(FINITE_NUMBER_CONSTRAINT)
     reward_overspeed: float = _constrained_field(FINITE_NUMBER_CONSTRAINT)
     reward_ade: float = _constrained_field(FINITE_NUMBER_CONSTRAINT)
+    reward_type: str = "puffer"
+    carl_terminal_hint: float = _constrained_field(FINITE_NUMBER_CONSTRAINT, default=1.0)
+    carl_max_overspeed: float = _constrained_field(POSITIVE_NUMBER_CONSTRAINT, default=2.23)
     map_dir: str = MISSING
     num_maps: int = _constrained_field(POSITIVE_INT_CONSTRAINT)
     obs_slots_lane_n: int = _constrained_field(NONNEGATIVE_INT_CONSTRAINT)
