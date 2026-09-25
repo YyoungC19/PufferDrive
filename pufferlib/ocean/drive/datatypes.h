@@ -80,6 +80,10 @@ struct Agent {
     int current_route_idx; // Tracks progress through route array
     float last_route_completion;
     int route_completion_initialized;
+    int carl_ttc_penalty_ticks;
+    int carl_comfort_penalty_ticks[CARL_COMFORT_METRICS];
+    int carl_comfort_history_steps;
+    float carl_prev_yaw_rate;
 
     // Metrics and status tracking (size must match NUM_METRICS in drive.h)
     float metrics_array[NUM_METRICS]; // [collision, offroad, red_light, stop_sign, reached_goal, lane_dist, lane_angle,

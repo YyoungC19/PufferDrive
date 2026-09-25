@@ -2164,6 +2164,8 @@ static int my_log(PyObject *dict, Env *env, Log *log, float n) {
     assign_to_dict(dict, "reward_components/route_progress", log->reward_route_progress);
     assign_to_dict(dict, "reward_components/carl_terminal", log->reward_carl_terminal);
     assign_to_dict(dict, "route_completion", log->route_completion);
+    assign_to_dict(dict, "carl/comfort_factor", log->carl_comfort_factor);
+    assign_to_dict(dict, "carl/ttc_penalty_rate", log->carl_ttc_penalty_rate);
     assign_to_dict(dict, "reward_components/lane_align", log->reward_lane_align);
     assign_to_dict(dict, "reward_components/lane_center", log->reward_lane_center);
     assign_to_dict(dict, "reward_components/comfort", log->reward_comfort);

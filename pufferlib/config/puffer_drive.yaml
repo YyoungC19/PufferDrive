@@ -65,7 +65,7 @@ env:
   # Stop sign behavior - options: "ignore", "stop", "remove"
   stop_sign_behavior: stop
   traffic_lights_enabled: true
-  stop_signs_enabled: false
+  stop_signs_enabled: true
   yield_signs_enabled: false
   # Share static map geometry (roads/grid/lane-graph) across envs using the same map
   use_map_cache: true
@@ -126,7 +126,7 @@ env:
   max_goal_spacing: 200.0
   # --- Rewards ---
   # CaRL simple reward: route-completion delta modulated by lane position,
-  # overspeed and TTC; collision/red-light terminal hints are additive.
+  # overspeed, TTC and comfort; collision/red-light terminal hints are additive.
   reward_type: carl
   carl_terminal_hint: 1.0
   carl_max_overspeed: 2.23

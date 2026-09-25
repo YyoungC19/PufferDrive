@@ -82,6 +82,8 @@ struct Log {
     float reward_route_progress;
     float reward_carl_terminal;
     float route_completion;
+    float carl_comfort_factor;
+    float carl_ttc_penalty_rate;
     float reward_lane_align;
     float reward_lane_center;
     float reward_comfort;
@@ -447,6 +449,12 @@ static void reset_agent_state(Agent *agent) {
     agent->current_route_idx = 0;
     agent->last_route_completion = 0.0f;
     agent->route_completion_initialized = 0;
+    agent->carl_ttc_penalty_ticks = 0;
+    for (int i = 0; i < CARL_COMFORT_METRICS; i++) {
+        agent->carl_comfort_penalty_ticks[i] = 0;
+    }
+    agent->carl_comfort_history_steps = 0;
+    agent->carl_prev_yaw_rate = 0.0f;
     agent->accel_long = 0.0f;
     agent->accel_lat = 0.0f;
     agent->jerk_long = 0.0f;
@@ -2117,6 +2125,43 @@ static void compute_agent_ttc(Drive *env, int agent_idx) {
     }
 }
 
+static float compute_carl_comfort_factor(Drive *env, Agent *agent) {
+    for (int i = 0; i < CARL_COMFORT_METRICS; i++) {
+        if (agent->carl_comfort_penalty_ticks[i] > 0) {
+            agent->carl_comfort_penalty_ticks[i]--;
+        }
+    }
+
+    float yaw_accel = (agent->yaw_rate - agent->carl_prev_yaw_rate) / env->dt;
+    agent->carl_prev_yaw_rate = agent->yaw_rate;
+    agent->carl_comfort_history_steps++;
+
+    if (agent->carl_comfort_history_steps >= CARL_COMFORT_WARMUP_STEPS) {
+        float jerk_magnitude = hypotf(agent->jerk_long, agent->jerk_lat);
+        int violations[CARL_COMFORT_METRICS] = {
+            agent->accel_long > CARL_MAX_LON_ACCEL || agent->accel_long < CARL_MIN_LON_ACCEL,
+            fabsf(agent->accel_lat) > CARL_MAX_ABS_LAT_ACCEL,
+            jerk_magnitude > CARL_MAX_ABS_MAG_JERK,
+            fabsf(agent->jerk_long) > CARL_MAX_ABS_LON_JERK,
+            fabsf(agent->yaw_rate) > CARL_MAX_ABS_YAW_RATE,
+            fabsf(yaw_accel) > CARL_MAX_ABS_YAW_ACCEL,
+        };
+        int penalty_ticks = (int) ceilf(CARL_PENALTY_DURATION_SECONDS / env->dt);
+        for (int i = 0; i < CARL_COMFORT_METRICS; i++) {
+            if (violations[i]) {
+                agent->carl_comfort_penalty_ticks[i] = penalty_ticks;
+            }
+        }
+    }
+
+    int active_penalties = 0;
+    for (int i = 0; i < CARL_COMFORT_METRICS; i++) {
+        active_penalties += agent->carl_comfort_penalty_ticks[i] > 0;
+    }
+    return 1.0f - CARL_COMFORT_PENALTY_FACTOR
+        * ((float) active_penalties / (float) CARL_COMFORT_METRICS);
+}
+
 static void compute_carl_reward(Drive *env, int agent_idx, int active_idx) {
     Agent *agent = &env->agents[agent_idx];
     Log *agent_log = &env->logs[active_idx];
@@ -2129,12 +2174,10 @@ static void compute_carl_reward(Drive *env, int agent_idx, int active_idx) {
     float progress_reward = completion - agent->last_route_completion;
     agent->last_route_completion = completion;
 
-    // CaRL use_perc_progress: scale route progress by lateral lane position.
-    float lane_factor = 1.0f - clip(
-        fabsf(agent->metrics_array[LANE_DIST_IDX]) / fmaxf(0.5f * LANE_WIDTH, 1e-6f),
-        0.0f,
-        1.0f);
-    progress_reward *= lane_factor;
+    // CaRL zeros progress outside the route lanes.
+    if (agent->metrics_array[OFFROAD_IDX] > 0.0f) {
+        progress_reward = 0.0f;
+    }
 
     // CaRL speed penalty: linear decay over the configured overspeed margin.
     int lane_idx = agent->current_lane_idx;
@@ -2145,14 +2188,30 @@ static void compute_carl_reward(Drive *env, int agent_idx, int active_idx) {
         }
     }
 
-    // Reuse PufferDrive's physical TTC calculation; CaRL halves progress during a violation.
+    // CaRL keeps TTC violations active for 500 reference ticks (50 seconds at 10 Hz).
+    if (agent->carl_ttc_penalty_ticks > 0) {
+        agent->carl_ttc_penalty_ticks--;
+    }
     compute_agent_ttc(env, agent_idx);
     if (agent->metrics_array[TTC_IDX] < TTC_VIOLATION_THRESHOLD) {
+        agent->carl_ttc_penalty_ticks = (int) ceilf(CARL_PENALTY_DURATION_SECONDS / env->dt);
+    }
+    if (agent->carl_ttc_penalty_ticks > 0) {
         progress_reward *= 0.5f;
     }
-    if (agent->metrics_array[OFFROAD_IDX] > 0.0f) {
-        progress_reward = 0.0f;
-    }
+
+    // CaRL multiplicatively applies its six nuPlan-derived comfort checks.
+    float comfort_factor = compute_carl_comfort_factor(env, agent);
+    progress_reward *= comfort_factor;
+    agent_log->carl_comfort_factor += comfort_factor;
+    agent_log->carl_ttc_penalty_rate += agent->carl_ttc_penalty_ticks > 0;
+
+    // CaRL use_perc_progress: scale route progress by lateral lane position.
+    float lane_factor = 1.0f - clip(
+        fabsf(agent->metrics_array[LANE_DIST_IDX]) / fmaxf(0.5f * LANE_WIDTH, 1e-6f),
+        0.0f,
+        1.0f);
+    progress_reward *= lane_factor;
 
     float terminal_hint = 0.0f;
     if (agent->metrics_array[COLLISION_IDX] > 0.0f || agent->metrics_array[RED_LIGHT_IDX] > 0.0f) {
@@ -2282,6 +2341,8 @@ static void add_log(Drive *env) {
         episode_log.reward_route_progress += env->logs[i].reward_route_progress;
         episode_log.reward_carl_terminal += env->logs[i].reward_carl_terminal;
         episode_log.route_completion += env->logs[i].route_completion;
+        episode_log.carl_comfort_factor += env->logs[i].carl_comfort_factor / safe_timestep;
+        episode_log.carl_ttc_penalty_rate += env->logs[i].carl_ttc_penalty_rate / safe_timestep;
         episode_log.reward_lane_align += env->logs[i].reward_lane_align;
         episode_log.reward_lane_center += env->logs[i].reward_lane_center;
         episode_log.reward_comfort += env->logs[i].reward_comfort;

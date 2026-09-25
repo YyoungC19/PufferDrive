@@ -256,6 +256,20 @@ static const int ROAD_OFFSETS[25][2]
 #define REWARD_TYPE_PUFFER 0
 #define REWARD_TYPE_CARL 1
 
+// CaRL simple-reward settings used by the released 300M training recipe.
+// The reference runs at 10 Hz and keeps TTC/comfort violations active for 500 ticks.
+#define CARL_PENALTY_DURATION_SECONDS 50.0f
+#define CARL_COMFORT_METRICS 6
+#define CARL_COMFORT_WARMUP_STEPS 8
+#define CARL_COMFORT_PENALTY_FACTOR 0.5f
+#define CARL_MAX_ABS_LON_JERK 30.0f
+#define CARL_MAX_ABS_MAG_JERK 30.0f
+#define CARL_MIN_LON_ACCEL -20.0f
+#define CARL_MAX_LON_ACCEL 10.0f
+#define CARL_MAX_ABS_LAT_ACCEL 9.0f
+#define CARL_MAX_ABS_YAW_RATE 1.0f
+#define CARL_MAX_ABS_YAW_ACCEL 3.0f
+
 // =====================================================================================
 // 10. METRICS & SCORING
 // =====================================================================================
