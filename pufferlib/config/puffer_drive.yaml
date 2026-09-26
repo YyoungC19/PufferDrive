@@ -51,11 +51,11 @@ env:
   # Jerk dynamics: Zero both accelerations when velocity crosses zero
   reset_accel_on_stop: false
   # Time delta between steps in seconds
-  dt: 0.3
+  dt: 0.2
   # Base forward speed cap
   base_max_speed_mps: 20.0
-  # Optional nonzero launch speed for gigaflow random spawns
-  spawn_initial_speed: 0.0
+  # Match DriveZero training's moving logged states; zero jerk preserves this speed.
+  spawn_initial_speed: 5.0
   # Collision behavior - options: "ignore", "stop", "remove"
   collision_behavior: stop
   # Offroad behavior - options: "ignore", "stop", "remove"
@@ -73,12 +73,12 @@ env:
   preload_map_cache: false
   # Precompute neighboring road entities for observation queries
   use_neighbor_cache: true
-  # Number of steps before reset
-  scenario_length: 2560
+  # DriveZero trains at 5 Hz with 110-step (22 s) rollouts.
+  scenario_length: 110
   # Frequency of resampling scenario (in steps), 0 to disable
   resample_frequency: 256000
   # End the episode early when too many agents are inactive; otherwise use scenario_length
-  termination_mode: true
+  termination_mode: false
   # Ratio of inactive agents (stopped/removed) that triggers early reset
   inactive_agent_threshold: 0.4
   # End the episode as soon as the agent reaches its final goal. Only active in
@@ -119,11 +119,11 @@ env:
   goal_radius: 1.5
   # Maximum speed at final waypoint to count goal reward
   goal_speed: 3.0
-  # DriveZero route anchors: near=L/2, far=L, L=min(route_remaining, 12*max(speed, 5)).
+  # Two future-route anchors stand in for DriveZero's future-log anchors in gigaflow.
   num_goals: 2
-  # Used by the native Puffer reward only.
-  min_goal_spacing: 20.0
-  max_goal_spacing: 200.0
+  # Native route sampler uses incremental spacing: near=5-10 m, far=10-20 m.
+  min_goal_spacing: 5.0
+  max_goal_spacing: 10.0
   # --- Rewards ---
   reward_type: drivezero
   reward_conditioning: false

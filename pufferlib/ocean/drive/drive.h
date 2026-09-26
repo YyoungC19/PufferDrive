@@ -1018,16 +1018,9 @@ static bool generate_new_goals_from_route(Drive *env, Agent *agent) {
 
     // Sample a spacing per goal, then walk the route placing goals at those forward distances.
     float goal_spacings_meters[MAX_GOALS];
-    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
-        // chain_goals consumes incremental spacings, so L/2 + L/2 places anchors at L/2 and L.
-        float lookahead = DRIVEZERO_LOOKAHEAD_SECONDS * fmaxf(agent->sim_speed, DRIVEZERO_MIN_LOOKAHEAD_SPEED);
-        lookahead = fminf(route_remaining_meters, lookahead);
-        goal_spacings_meters[0] = 0.5f * lookahead;
-        goal_spacings_meters[1] = 0.5f * lookahead;
-    } else {
-        for (int goal_idx = 0; goal_idx < env->num_goals; goal_idx++) {
-            goal_spacings_meters[goal_idx] = sample_uniform(&env->rng_state, env->min_goal_spacing, env->max_goal_spacing);
-        }
+    for (int goal_idx = 0; goal_idx < env->num_goals; goal_idx++) {
+        goal_spacings_meters[goal_idx]
+            = sample_uniform(&env->rng_state, env->min_goal_spacing, env->max_goal_spacing);
     }
 
     float goal_x[MAX_GOALS], goal_y[MAX_GOALS], goal_z[MAX_GOALS];
@@ -4807,12 +4800,14 @@ void c_step(Drive *env) {
             // route-based goals on WOMD maps fails (removed=1).
             continue;
         }
-        // Rolling slides the window forward by one goal; finite advances the alias to the next goal in the set.
-        // Both fall back to a full regen: rolling on dead-end, finite when exhausted.
+        // Rolling slides the window forward by one goal; finite advances within the fixed set.
         bool regen;
         if (env->goal_regen_mode == GOAL_REGEN_ROLLING) {
             regen = !roll_goals(env, agent);
         } else if (agent->current_goal_idx == agent->goal_count) {
+            if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+                continue;
+            }
             regen = true;
         } else {
             agent->current_goal_x = agent->list_goal_x[agent->current_goal_idx];
