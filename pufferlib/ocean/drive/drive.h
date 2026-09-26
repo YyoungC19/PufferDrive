@@ -79,6 +79,15 @@ struct Log {
     float reward_red_light;
     float reward_stop_sign;
     float reward_goal;
+    float reward_drivezero_hard;
+    float reward_drivezero_soft;
+    float drivezero_cross_lane;
+    float drivezero_centerline;
+    float drivezero_curb;
+    float drivezero_comfort;
+    float drivezero_ttc;
+    float drivezero_overspeed;
+    float drivezero_product;
     float reward_lane_align;
     float reward_lane_center;
     float reward_comfort;
@@ -225,6 +234,7 @@ struct Drive {
     float reward_timestep;
     float reward_overspeed;
     float reward_ade;
+    int reward_type;
     int reward_conditioning;
     int reward_randomization;
     int reward_log_sampling;
@@ -439,6 +449,8 @@ static void reset_agent_state(Agent *agent) {
     agent->current_lane_idx = -1;
     agent->previous_lane_idx = -1;
     agent->current_route_idx = 0;
+    agent->drivezero_prev_yaw_rate = 0.0f;
+    agent->drivezero_has_prev_yaw_rate = 0;
     agent->accel_long = 0.0f;
     agent->accel_lat = 0.0f;
     agent->jerk_long = 0.0f;
@@ -1006,8 +1018,16 @@ static bool generate_new_goals_from_route(Drive *env, Agent *agent) {
 
     // Sample a spacing per goal, then walk the route placing goals at those forward distances.
     float goal_spacings_meters[MAX_GOALS];
-    for (int goal_idx = 0; goal_idx < env->num_goals; goal_idx++) {
-        goal_spacings_meters[goal_idx] = sample_uniform(&env->rng_state, env->min_goal_spacing, env->max_goal_spacing);
+    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+        // chain_goals consumes incremental spacings, so L/2 + L/2 places anchors at L/2 and L.
+        float lookahead = DRIVEZERO_LOOKAHEAD_SECONDS * fmaxf(agent->sim_speed, DRIVEZERO_MIN_LOOKAHEAD_SPEED);
+        lookahead = fminf(route_remaining_meters, lookahead);
+        goal_spacings_meters[0] = 0.5f * lookahead;
+        goal_spacings_meters[1] = 0.5f * lookahead;
+    } else {
+        for (int goal_idx = 0; goal_idx < env->num_goals; goal_idx++) {
+            goal_spacings_meters[goal_idx] = sample_uniform(&env->rng_state, env->min_goal_spacing, env->max_goal_spacing);
+        }
     }
 
     float goal_x[MAX_GOALS], goal_y[MAX_GOALS], goal_z[MAX_GOALS];
@@ -2061,6 +2081,65 @@ static void compute_agent_ttc(Drive *env, int agent_idx) {
     }
 }
 
+static void compute_drivezero_reward(Drive *env, int agent_idx, int active_idx) {
+    Agent *agent = &env->agents[agent_idx];
+    Log *agent_log = &env->logs[active_idx];
+
+    bool collision = agent->metrics_array[COLLISION_IDX] > 0.0f;
+    bool offroad = agent->metrics_array[OFFROAD_IDX] > 0.0f;
+    bool hard_event = collision || offroad;
+    float hard_reward = collision ? -DRIVEZERO_COLLISION_PENALTY
+                                  : offroad ? -(DRIVEZERO_OFFROAD_PENALTY + 0.1f * agent->sim_speed) : 0.0f;
+    float goal_reward = agent->metrics_array[REACHED_GOAL_IDX] > 0.0f ? DRIVEZERO_GOAL_REWARD : 0.0f;
+
+    float edge_distance = fabsf(agent->metrics_array[LANE_DIST_IDX]) + 0.5f * agent->sim_width;
+    float q_cross_lane
+        = (agent->current_lane_idx != -1 && edge_distance <= MULTI_LANE_THRESHOLD) ? 1.0f : 0.0f;
+    float q_centerline = 1.0f
+        - clip(fabsf(agent->metrics_array[LANE_DIST_IDX]) / fmaxf(0.5f * LANE_WIDTH, 1e-6f), 0.0f, 1.0f);
+    float q_curb = offroad ? 0.0f : 1.0f;
+
+    float yaw_accel = 0.0f;
+    if (agent->drivezero_has_prev_yaw_rate) {
+        yaw_accel = (agent->yaw_rate - agent->drivezero_prev_yaw_rate) / env->dt;
+    }
+    agent->drivezero_prev_yaw_rate = agent->yaw_rate;
+    agent->drivezero_has_prev_yaw_rate = 1;
+    float jerk_magnitude = hypotf(agent->jerk_long, agent->jerk_lat);
+    float q_comfort
+        = (agent->accel_long >= DRIVEZERO_MIN_LON_ACCEL && agent->accel_long <= DRIVEZERO_MAX_LON_ACCEL
+           && fabsf(agent->accel_lat) <= DRIVEZERO_MAX_ABS_LAT_ACCEL
+           && jerk_magnitude <= DRIVEZERO_MAX_ABS_MAG_JERK
+           && fabsf(agent->jerk_long) <= DRIVEZERO_MAX_ABS_LON_JERK
+           && fabsf(agent->yaw_rate) <= DRIVEZERO_MAX_ABS_YAW_RATE
+           && fabsf(yaw_accel) <= DRIVEZERO_MAX_ABS_YAW_ACCEL)
+        ? 1.0f
+        : 0.0f;
+
+    compute_agent_ttc(env, agent_idx);
+    float q_ttc = agent->metrics_array[TTC_IDX] >= TTC_VIOLATION_THRESHOLD ? 1.0f : 0.0f;
+    float speed_limit = 15.0f;
+    if (agent->current_lane_idx != -1 && env->road_elements[agent->current_lane_idx].speed_limit > 0.0f) {
+        speed_limit = env->road_elements[agent->current_lane_idx].speed_limit;
+    }
+    float excess_speed = fmaxf(agent->sim_speed - speed_limit, 0.0f);
+    float q_overspeed = fmaxf(0.0f, 1.0f - excess_speed / DRIVEZERO_MAX_OVERSPEED);
+    float product = q_cross_lane * q_centerline * q_curb * q_comfort * q_ttc * q_overspeed;
+    float soft_reward = product / DRIVEZERO_SOFT_NORMALIZER;
+
+    env->rewards[active_idx] += hard_reward + (hard_event ? 0.0f : goal_reward + soft_reward);
+    agent_log->reward_drivezero_hard += hard_reward;
+    agent_log->reward_goal += hard_event ? 0.0f : goal_reward;
+    agent_log->reward_drivezero_soft += hard_event ? 0.0f : soft_reward;
+    agent_log->drivezero_cross_lane += q_cross_lane;
+    agent_log->drivezero_centerline += q_centerline;
+    agent_log->drivezero_curb += q_curb;
+    agent_log->drivezero_comfort += q_comfort;
+    agent_log->drivezero_ttc += q_ttc;
+    agent_log->drivezero_overspeed += q_overspeed;
+    agent_log->drivezero_product += product;
+}
+
 // Puffer score computation
 // Uses hybrid weighted average: multiplier weights (binary gates) + average weights (continuous)
 static float calculate_duration_scaled_violation_score(float violation_timestep_count, float duration_steps, float dt) {
@@ -2175,6 +2254,15 @@ static void add_log(Drive *env) {
         episode_log.reward_red_light += env->logs[i].reward_red_light;
         episode_log.reward_stop_sign += env->logs[i].reward_stop_sign;
         episode_log.reward_goal += env->logs[i].reward_goal;
+        episode_log.reward_drivezero_hard += env->logs[i].reward_drivezero_hard;
+        episode_log.reward_drivezero_soft += env->logs[i].reward_drivezero_soft;
+        episode_log.drivezero_cross_lane += env->logs[i].drivezero_cross_lane / safe_timestep;
+        episode_log.drivezero_centerline += env->logs[i].drivezero_centerline / safe_timestep;
+        episode_log.drivezero_curb += env->logs[i].drivezero_curb / safe_timestep;
+        episode_log.drivezero_comfort += env->logs[i].drivezero_comfort / safe_timestep;
+        episode_log.drivezero_ttc += env->logs[i].drivezero_ttc / safe_timestep;
+        episode_log.drivezero_overspeed += env->logs[i].drivezero_overspeed / safe_timestep;
+        episode_log.drivezero_product += env->logs[i].drivezero_product / safe_timestep;
         episode_log.reward_lane_align += env->logs[i].reward_lane_align;
         episode_log.reward_lane_center += env->logs[i].reward_lane_center;
         episode_log.reward_comfort += env->logs[i].reward_comfort;
@@ -2252,6 +2340,18 @@ static inline void sample_erratic_flags(Drive *env, Agent *agent) {
 }
 
 static void generate_reward_coefs(Drive *env, Agent *agent) {
+    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+        agent->reward_coefs[REWARD_COEF_GOAL_RADIUS] = env->goal_radius;
+        agent->reward_coefs[REWARD_COEF_GOAL_SPEED] = env->goal_speed;
+        for (int coef_idx = REWARD_COEF_COLLISION; coef_idx <= REWARD_COEF_OVERSPEED; coef_idx++) {
+            agent->reward_coefs[coef_idx] = 0.0f;
+        }
+        agent->reward_coefs[REWARD_COEF_THROTTLE] = 1.0f;
+        agent->reward_coefs[REWARD_COEF_STEER] = 1.0f;
+        agent->reward_coefs[REWARD_COEF_ACC] = 1.0f;
+        agent->reward_coefs[REWARD_COEF_SPEED] = 1.0f;
+        return;
+    }
     if (env->reward_randomization) {
         static const int random_coefs[] = {
             REWARD_COEF_GOAL_RADIUS,
@@ -3545,7 +3645,9 @@ static void compute_metrics(Drive *env, int agent_idx, int log_idx) {
     if (env->traffic_lights_enabled && env->obs_slots_traffic_controls_n && check_red_light_violation(env, agent_idx)) {
         agent->metrics_array[RED_LIGHT_IDX] = 1.0f;
         apply_infraction_behavior(agent, env->traffic_light_behavior);
-        return;
+        if (env->reward_type != REWARD_TYPE_DRIVEZERO) {
+            return;
+        }
     }
 
     // Priority 4: Handle stop sign violation
@@ -3594,7 +3696,25 @@ static void compute_rewards(Drive *env, int i) {
     int agent_idx = env->active_agent_indices[i];
     Agent *agent = &env->agents[agent_idx];
     Log *agent_log = &env->logs[i];
+    float current_ade = agent->metrics_array[AVG_DISPLACEMENT_ERROR_IDX];
 
+    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+        compute_drivezero_reward(env, agent_idx, i);
+        if (agent->metrics_array[COLLISION_IDX] > 0.0f) {
+            agent_log->collision_rate = 1.0f;
+        }
+        if (agent->metrics_array[OFFROAD_IDX] > 0.0f) {
+            agent_log->offroad_rate = 1.0f;
+        }
+        if (agent->metrics_array[RED_LIGHT_IDX] > 0.0f) {
+            agent_log->red_light_violation_rate = 1.0f;
+        }
+        if (agent->metrics_array[STOP_SIGN_IDX] > 0.0f) {
+            agent_log->stop_sign_violation_rate = 1.0f;
+        }
+    }
+
+    if (env->reward_type == REWARD_TYPE_PUFFER) {
     // Collision reward
     if (agent->metrics_array[COLLISION_IDX] > 0.0f) {
         // Velocity-dependent penalty: incentivizes braking before unavoidable collision.
@@ -3698,11 +3818,11 @@ static void compute_rewards(Drive *env, int i) {
     agent_log->reward_overspeed += speed_reward;
 
     // ADE reward
-    float current_ade = agent->metrics_array[AVG_DISPLACEMENT_ERROR_IDX];
     if (current_ade > 0.0f && env->reward_ade != 0.0f) {
         float ade_reward = env->reward_ade * current_ade;
         env->rewards[i] += ade_reward;
         agent_log->reward_ade += ade_reward;
+    }
     }
     agent_log->avg_displacement_error = current_ade;
 
@@ -3718,7 +3838,9 @@ static void compute_rewards(Drive *env, int i) {
         agent->metrics_array[MULTI_LANE_TIME_IDX] = ml_time;
         agent->metrics_array[MULTI_LANE_SCORE_IDX] = ml_score;
 
-        compute_agent_ttc(env, agent_idx);
+        if (env->reward_type != REWARD_TYPE_DRIVEZERO) {
+            compute_agent_ttc(env, agent_idx);
+        }
         if (agent->metrics_array[COLLISION_IDX] > 0.0f) {
             agent->metrics_array[TTC_IDX] = 0.0f;
             agent->metrics_array[DISTANCE_TO_COLLISION_IDX] = 0.0f;

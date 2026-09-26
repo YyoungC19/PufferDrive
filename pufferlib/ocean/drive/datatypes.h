@@ -78,6 +78,8 @@ struct Agent {
     int *route;
     int route_gt_len;      // Number of leading route lanes supported by GT before extension
     int current_route_idx; // Tracks progress through route array
+    float drivezero_prev_yaw_rate;
+    int drivezero_has_prev_yaw_rate;
 
     // Metrics and status tracking (size must match NUM_METRICS in drive.h)
     float metrics_array[NUM_METRICS]; // [collision, offroad, red_light, stop_sign, reached_goal, lane_dist, lane_angle,

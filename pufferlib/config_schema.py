@@ -162,6 +162,11 @@ class GoalSource(Enum):
     gt = 2
 
 
+class RewardType(Enum):
+    puffer = 0
+    drivezero = 1
+
+
 class PackageName(Enum):
     ocean = 0
 
@@ -283,6 +288,7 @@ class DriveEnvConfig:
     num_goals: int = _constrained_field(POSITIVE_INT_CONSTRAINT)
     min_goal_spacing: float = _constrained_field(NONNEGATIVE_NUMBER_CONSTRAINT)
     max_goal_spacing: float = _constrained_field(POSITIVE_NUMBER_CONSTRAINT)
+    reward_type: RewardType = MISSING
     reward_conditioning: bool = MISSING
     reward_randomization: bool = MISSING
     reward_log_sampling: bool = MISSING
@@ -566,6 +572,21 @@ def _validate_cross_field_constraints(config, context):
         _raise_config_error(context, "env.init_step_min_horizon", "must be smaller than env.scenario_length")
     if env["goal_source"] == "gt" and env["simulation_mode"] != "replay":
         _raise_config_error(context, "env.goal_source", "'gt' is only supported in replay mode")
+    if env["reward_type"] == "drivezero":
+        if env["goal_source"] != "route":
+            _raise_config_error(context, "env.goal_source", "DriveZero reward requires 'route'")
+        if env["num_goals"] != 2:
+            _raise_config_error(context, "env.num_goals", "DriveZero reward requires exactly 2")
+        if not math.isclose(env["goal_radius"], 1.5):
+            _raise_config_error(context, "env.goal_radius", "DriveZero reward requires 1.5 meters")
+        if env["terminate_on_goal"]:
+            _raise_config_error(context, "env.terminate_on_goal", "must be false for DriveZero reward")
+        if env["reward_conditioning"] or env["reward_randomization"]:
+            _raise_config_error(
+                context,
+                "env.reward_conditioning",
+                "DriveZero reward does not use reward conditioning or randomization",
+            )
     if env["terminate_on_goal"] and (env["simulation_mode"] != "replay" or env["control_mode"] != "control_sdc_only"):
         _raise_config_error(context, "env.terminate_on_goal", "requires replay mode with control_sdc_only")
     if env.get("eval_mode") is not None and (

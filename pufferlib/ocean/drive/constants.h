@@ -253,6 +253,27 @@ static const int ROAD_OFFSETS[25][2]
 #define REWARD_COEF_SPEED 17
 #define NUM_REWARD_COEFS 18
 
+#define REWARD_TYPE_PUFFER 0
+#define REWARD_TYPE_DRIVEZERO 1
+
+// DriveZero reward and route-goal protocol (arXiv:2609.06055).
+#define DRIVEZERO_GOAL_REWARD 0.5f
+#define DRIVEZERO_COLLISION_PENALTY 1.0f
+#define DRIVEZERO_OFFROAD_PENALTY 2.0f
+#define DRIVEZERO_SOFT_NORMALIZER 110.0f
+#define DRIVEZERO_LOOKAHEAD_SECONDS 12.0f
+#define DRIVEZERO_MIN_LOOKAHEAD_SPEED 5.0f
+#define DRIVEZERO_MAX_OVERSPEED 2.23f
+
+// Six nuPlan-derived comfort checks used by CaRL's released training recipe.
+#define DRIVEZERO_MAX_ABS_LON_JERK 30.0f
+#define DRIVEZERO_MAX_ABS_MAG_JERK 30.0f
+#define DRIVEZERO_MIN_LON_ACCEL -20.0f
+#define DRIVEZERO_MAX_LON_ACCEL 10.0f
+#define DRIVEZERO_MAX_ABS_LAT_ACCEL 9.0f
+#define DRIVEZERO_MAX_ABS_YAW_RATE 1.0f
+#define DRIVEZERO_MAX_ABS_YAW_ACCEL 3.0f
+
 // =====================================================================================
 // 10. METRICS & SCORING
 // =====================================================================================

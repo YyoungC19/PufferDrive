@@ -1974,6 +1974,7 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_timestep = (float) unpack(kwargs, "reward_timestep");
     env->reward_overspeed = (float) unpack(kwargs, "reward_overspeed");
     env->reward_ade = (float) unpack(kwargs, "reward_ade");
+    env->reward_type = (int) unpack(kwargs, "reward_type");
     env->collision_behavior = (int) unpack(kwargs, "collision_behavior");
     env->offroad_behavior = (int) unpack(kwargs, "offroad_behavior");
     env->traffic_light_behavior = (int) unpack(kwargs, "traffic_light_behavior");
@@ -2134,6 +2135,31 @@ static int my_log(PyObject *dict, Env *env, Log *log, float n) {
     float total_distance_travelled = log->total_distance_travelled * n;
     float total_infractions = log->total_infractions * n;
     float avg_distance_per_infraction = total_distance_travelled / fmaxf(1.0f, total_infractions);
+
+    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+        assign_to_dict(dict, "n", log->n);
+        assign_to_dict(dict, "offroad_rate", log->offroad_rate);
+        assign_to_dict(dict, "collision_rate", log->collision_rate);
+        assign_to_dict(dict, "red_light_violation_rate", log->red_light_violation_rate);
+        assign_to_dict(dict, "episode_length", log->episode_length);
+        assign_to_dict(dict, "episode_return", log->episode_return);
+        assign_to_dict(dict, "num_goals_reached", log->num_goals_reached);
+        assign_to_dict(dict, "dnf_rate", log->dnf_rate);
+        assign_to_dict(dict, "score", log->score);
+        assign_to_dict(dict, "avg_speed_per_agent", log->avg_speed_per_agent);
+        assign_to_dict(dict, "avg_distance_per_infraction", avg_distance_per_infraction);
+        assign_to_dict(dict, "reward_components/hard", log->reward_drivezero_hard);
+        assign_to_dict(dict, "reward_components/goal", log->reward_goal);
+        assign_to_dict(dict, "reward_components/soft", log->reward_drivezero_soft);
+        assign_to_dict(dict, "drivezero/cross_lane", log->drivezero_cross_lane);
+        assign_to_dict(dict, "drivezero/centerline", log->drivezero_centerline);
+        assign_to_dict(dict, "drivezero/curb", log->drivezero_curb);
+        assign_to_dict(dict, "drivezero/comfort", log->drivezero_comfort);
+        assign_to_dict(dict, "drivezero/ttc", log->drivezero_ttc);
+        assign_to_dict(dict, "drivezero/overspeed", log->drivezero_overspeed);
+        assign_to_dict(dict, "drivezero/product", log->drivezero_product);
+        return 0;
+    }
 
     assign_to_dict(dict, "n", log->n);
     assign_to_dict(dict, "offroad_rate", log->offroad_rate);

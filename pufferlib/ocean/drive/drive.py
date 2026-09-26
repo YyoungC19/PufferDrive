@@ -34,6 +34,7 @@ class Drive(pufferlib.PufferEnv):
         reward_timestep=0.000025,
         reward_overspeed=0.05,
         reward_ade=0.0,
+        reward_type="puffer",
         min_goal_spacing=20.0,
         max_goal_spacing=60.0,
         num_goals=3,
@@ -150,6 +151,10 @@ class Drive(pufferlib.PufferEnv):
         self.reward_timestep = reward_timestep
         self.reward_overspeed = reward_overspeed
         self.reward_ade = reward_ade
+        self.reward_type = {
+            "puffer": binding.REWARD_TYPE_PUFFER,
+            "drivezero": binding.REWARD_TYPE_DRIVEZERO,
+        }[reward_type]
         self.goal_radius = goal_radius
         self.min_goal_spacing = min_goal_spacing
         self.max_goal_spacing = max_goal_spacing
@@ -163,6 +168,13 @@ class Drive(pufferlib.PufferEnv):
             "map": binding.GOAL_SOURCE_MAP,
             "gt": binding.GOAL_SOURCE_GT,
         }[goal_source]
+        if self.reward_type == binding.REWARD_TYPE_DRIVEZERO:
+            if self.goal_source != binding.GOAL_SOURCE_ROUTE or self.num_goals != 2:
+                raise ValueError("DriveZero reward requires goal_source='route' and num_goals=2")
+            if abs(self.goal_radius - 1.5) > 1e-6 or terminate_on_goal:
+                raise ValueError("DriveZero reward requires goal_radius=1.5 and terminate_on_goal=false")
+            if self.reward_conditioning or self.reward_randomization:
+                raise ValueError("DriveZero reward does not use reward conditioning or randomization")
         self.obs_goal_lane_distance = int(bool(obs_goal_lane_distance))
         infraction_behavior_values = {
             "ignore": binding.INFRACTION_BEHAVIOR_IGNORE,
@@ -449,6 +461,7 @@ class Drive(pufferlib.PufferEnv):
             "reward_timestep": self.reward_timestep,
             "reward_overspeed": self.reward_overspeed,
             "reward_ade": self.reward_ade,
+            "reward_type": self.reward_type,
             "collision_behavior": self.collision_behavior,
             "offroad_behavior": self.offroad_behavior,
             "traffic_light_behavior": self.traffic_light_behavior,
