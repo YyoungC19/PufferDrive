@@ -97,6 +97,7 @@ class Drive(pufferlib.PufferEnv):
         obs_lane_stride=1,
         obs_boundary_stride=1,
         obs_slots_partners_n=16,
+        obs_history_frames=5,
         obs_slots_traffic_controls_n=4,
         traffic_lights_enabled=True,
         stop_signs_enabled=False,
@@ -228,6 +229,7 @@ class Drive(pufferlib.PufferEnv):
         self.obs_lane_stride = obs_lane_stride
         self.obs_boundary_stride = obs_boundary_stride
         self.obs_slots_partners_n = obs_slots_partners_n
+        self.obs_history_frames = int(obs_history_frames)
         self.traffic_lights_enabled = traffic_lights_enabled
         self.stop_signs_enabled = stop_signs_enabled
         self.yield_signs_enabled = yield_signs_enabled
@@ -263,6 +265,8 @@ class Drive(pufferlib.PufferEnv):
         self.phantom_braking_trigger_prob = float(phantom_braking_trigger_prob)
         self.phantom_braking_duration_seconds = float(phantom_braking_duration_seconds) // self.dt
         self.partner_features = binding.PARTNER_FEATURES
+        self.history_features = binding.HISTORY_FEATURES
+        self.history_dim = (self.obs_slots_partners_n + 1) * self.obs_history_frames * self.history_features
         self.lane_features = binding.LANE_FEATURES
         self.boundary_features = binding.BOUNDARY_FEATURES
         self.traffic_control_features = binding.TRAFFIC_CONTROL_FEATURES
@@ -283,20 +287,23 @@ class Drive(pufferlib.PufferEnv):
             + self.obs_slots_boundary_kept * self.boundary_features
             + self.obs_slots_traffic_controls_n * self.traffic_control_features
             + self.obs_valid_count_features
+            + self.history_dim
         )
 
         self.single_observation_space = gymnasium.spaces.Box(low=-1, high=1, shape=(self.num_obs,), dtype=np.float32)
 
         # Observation distribution stats exclude raw traffic-control categories and valid-slot counts.
         self.obs_stats_feature_mask = np.ones(self.num_obs, dtype=bool)
-        valid_counts_start_idx = self.num_obs - self.obs_valid_count_features
+        valid_counts_start_idx = self.num_obs - self.history_dim - self.obs_valid_count_features
         traffic_controls_start_idx = (
             valid_counts_start_idx - self.obs_slots_traffic_controls_n * self.traffic_control_features
         )
         for slot_idx in range(self.obs_slots_traffic_controls_n):
             slot_end_idx = traffic_controls_start_idx + (slot_idx + 1) * self.traffic_control_features
             self.obs_stats_feature_mask[slot_end_idx - TRAFFIC_CONTROL_CATEGORICAL_FEATURE_COUNT : slot_end_idx] = False
-        self.obs_stats_feature_mask[valid_counts_start_idx:] = False
+        self.obs_stats_feature_mask[
+            valid_counts_start_idx : valid_counts_start_idx + self.obs_valid_count_features
+        ] = False
 
         self.init_step = init_step
         # Per C environment randomized start point. When on, each parallel environment
@@ -480,6 +487,7 @@ class Drive(pufferlib.PufferEnv):
             "obs_lane_stride": self.obs_lane_stride,
             "obs_boundary_stride": self.obs_boundary_stride,
             "obs_slots_partners_n": self.obs_slots_partners_n,
+            "obs_history_frames": self.obs_history_frames,
             "obs_slots_traffic_controls_n": self.obs_slots_traffic_controls_n,
             "traffic_lights_enabled": self.traffic_lights_enabled,
             "stop_signs_enabled": self.stop_signs_enabled,

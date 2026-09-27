@@ -2002,6 +2002,11 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->obs_slots_boundary_n = (int) unpack(kwargs, "obs_slots_boundary_n");
     env->obs_slots_lane_n = (int) unpack(kwargs, "obs_slots_lane_n");
     env->obs_slots_partners_n = (int) unpack(kwargs, "obs_slots_partners_n");
+    env->obs_history_frames = (int) unpack(kwargs, "obs_history_frames");
+    if (env->obs_history_frames < 1 || env->obs_history_frames > MAX_OBS_HISTORY_FRAMES) {
+        PyErr_Format(PyExc_ValueError, "obs_history_frames must be in [1, %d]", MAX_OBS_HISTORY_FRAMES);
+        return -1;
+    }
     env->obs_slots_traffic_controls_n = (int) unpack(kwargs, "obs_slots_traffic_controls_n");
     env->traffic_lights_enabled = (bool) unpack(kwargs, "traffic_lights_enabled");
     env->stop_signs_enabled = (bool) unpack(kwargs, "stop_signs_enabled");

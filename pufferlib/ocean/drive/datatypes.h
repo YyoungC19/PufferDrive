@@ -34,6 +34,19 @@ static inline int is_controllable_agent(int type) {
     return (type == VEHICLE || type == PEDESTRIAN || type == CYCLIST);
 }
 
+typedef struct {
+    float x;
+    float y;
+    float z;
+    float cos_heading;
+    float sin_heading;
+    float vx;
+    float vy;
+    float length;
+    float width;
+    int valid;
+} AgentHistoryFrame;
+
 struct Agent {
     int id;
     int type;
@@ -72,6 +85,7 @@ struct Agent {
     float prev_cos_heading;
     float prev_sin_heading;
     int sim_valid;
+    AgentHistoryFrame obs_history[MAX_OBS_HISTORY_FRAMES];
 
     // Route information
     int route_length;

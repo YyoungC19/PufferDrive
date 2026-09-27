@@ -152,6 +152,8 @@ env:
   obs_slots_lane_n: 70
   obs_slots_boundary_n: 50
   obs_slots_partners_n: 16
+  # DriveRL uses the current frame plus four preceding frames at 5 Hz.
+  obs_history_frames: 5
   obs_slots_traffic_controls_n: 4
   # Fraction of segment observation slots to drop (reduces obs size)
   obs_dropout_lane: 0.3

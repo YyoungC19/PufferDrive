@@ -311,6 +311,7 @@ class DriveEnvConfig:
     obs_slots_lane_n: int = _constrained_field(NONNEGATIVE_INT_CONSTRAINT)
     obs_slots_boundary_n: int = _constrained_field(NONNEGATIVE_INT_CONSTRAINT)
     obs_slots_partners_n: int = _constrained_field(NONNEGATIVE_INT_CONSTRAINT)
+    obs_history_frames: int = _constrained_field(POSITIVE_INT_CONSTRAINT)
     obs_slots_traffic_controls_n: int = _constrained_field(NONNEGATIVE_INT_CONSTRAINT)
     obs_dropout_lane: float = _constrained_field(PROBABILITY_CONSTRAINT)
     obs_dropout_boundary: float = _constrained_field(PROBABILITY_CONSTRAINT)
@@ -573,6 +574,10 @@ def _validate_cross_field_constraints(config, context):
     if env["goal_source"] == "gt" and env["simulation_mode"] != "replay":
         _raise_config_error(context, "env.goal_source", "'gt' is only supported in replay mode")
     if env["reward_type"] == "drivezero":
+        if env["obs_history_frames"] != 5:
+            _raise_config_error(context, "env.obs_history_frames", "DriveZero history requires 5 frames")
+        if not math.isclose(env["dt"], 0.2):
+            _raise_config_error(context, "env.dt", "DriveZero history requires 5 Hz (dt=0.2)")
         if env["goal_source"] != "route":
             _raise_config_error(context, "env.goal_source", "DriveZero reward requires 'route'")
         if env["num_goals"] != 2:

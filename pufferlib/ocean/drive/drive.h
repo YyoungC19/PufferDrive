@@ -251,6 +251,7 @@ struct Drive {
     int obs_slots_boundary_n;
     int obs_slots_lane_n;
     int obs_slots_partners_n;
+    int obs_history_frames;
     int obs_slots_traffic_controls_n;
     int traffic_lights_enabled;
     int stop_signs_enabled;
@@ -482,6 +483,35 @@ static void copy_pose_to_prev(Agent *agent) {
     agent->prev_y = agent->sim_y;
     agent->prev_cos_heading = agent->cos_heading;
     agent->prev_sin_heading = agent->sin_heading;
+}
+
+static AgentHistoryFrame current_history_frame(const Agent *agent) {
+    return (AgentHistoryFrame) {
+        .x = agent->sim_x,
+        .y = agent->sim_y,
+        .z = agent->sim_z,
+        .cos_heading = agent->cos_heading,
+        .sin_heading = agent->sin_heading,
+        .vx = agent->sim_vx,
+        .vy = agent->sim_vy,
+        .length = agent->sim_length,
+        .width = agent->sim_width,
+        .valid = agent->sim_valid && !agent->removed,
+    };
+}
+
+static void initialize_agent_history(Agent *agent) {
+    AgentHistoryFrame frame = current_history_frame(agent);
+    for (int i = 0; i < MAX_OBS_HISTORY_FRAMES; i++) {
+        agent->obs_history[i] = frame;
+    }
+}
+
+static void push_agent_history(Agent *agent) {
+    for (int i = 0; i < MAX_OBS_HISTORY_FRAMES - 1; i++) {
+        agent->obs_history[i] = agent->obs_history[i + 1];
+    }
+    agent->obs_history[MAX_OBS_HISTORY_FRAMES - 1] = current_history_frame(agent);
 }
 
 static inline void update_agent_radius(Agent *agent) {
@@ -3205,11 +3235,17 @@ void c_close(Drive *env) {
     free_loaded_map_data(env);
 }
 
-static int compute_observation_size(Drive *env) {
+static int compute_base_observation_size(Drive *env) {
     return EGO_FEATURES + PARTNER_FEATURES * env->obs_slots_partners_n + LANE_FEATURES * env->obs_slots_lane_kept
         + BOUNDARY_FEATURES * env->obs_slots_boundary_kept
         + TRAFFIC_CONTROL_FEATURES * env->obs_slots_traffic_controls_n + OBS_VALID_COUNT_FEATURES
         + env->reward_conditioning * NUM_REWARD_COEFS + env->num_goals * GOAL_FEATURES;
+}
+
+static int compute_observation_size(Drive *env) {
+    int history_size
+        = (env->obs_slots_partners_n + 1) * env->obs_history_frames * HISTORY_FEATURES;
+    return compute_base_observation_size(env) + history_size;
 }
 
 void allocate(Drive *env) {
@@ -3934,7 +3970,51 @@ static int write_reward_target_obs(Drive *env, Agent *ego, float *obs, int obs_i
     return obs_idx;
 }
 
-static int write_partner_obs(Drive *env, Agent *ego, int agent_idx, float *obs, int obs_idx, int *partner_count) {
+static int write_actor_history_obs(Drive *env, Agent *ego, Agent *actor, float *obs, int obs_idx) {
+    // DriveRL layout: position(2), velocity(2), yaw(1), size(2), box corners(8), oldest to newest.
+    int first_frame = MAX_OBS_HISTORY_FRAMES - env->obs_history_frames;
+    for (int frame_idx = first_frame; frame_idx < MAX_OBS_HISTORY_FRAMES; frame_idx++) {
+        AgentHistoryFrame *frame = &actor->obs_history[frame_idx];
+        if (!frame->valid) {
+            memset(&obs[obs_idx], 0, HISTORY_FEATURES * sizeof(float));
+            obs_idx += HISTORY_FEATURES;
+            continue;
+        }
+
+        float rel_x, rel_y, rel_vx, rel_vy, rel_heading_x, rel_heading_y;
+        project_point_to_ego_frame(ego, frame->x, frame->y, &rel_x, &rel_y);
+        project_vector_to_ego_frame(ego, frame->vx, frame->vy, &rel_vx, &rel_vy);
+        project_vector_to_ego_frame(
+            ego, frame->cos_heading, frame->sin_heading, &rel_heading_x, &rel_heading_y);
+        obs[obs_idx++] = rel_x / env->obs_norm_xy_offset_m;
+        obs[obs_idx++] = rel_y / env->obs_norm_xy_offset_m;
+        obs[obs_idx++] = rel_vx / env->obs_norm_speed_mps;
+        obs[obs_idx++] = rel_vy / env->obs_norm_speed_mps;
+        obs[obs_idx++] = atan2f(rel_heading_y, rel_heading_x) / M_PI;
+        obs[obs_idx++] = frame->length / env->obs_norm_veh_length_m;
+        obs[obs_idx++] = frame->width / env->obs_norm_veh_width_m;
+
+        float corners[4][2];
+        compute_bounding_box_corners(
+            frame->x,
+            frame->y,
+            frame->length,
+            frame->width,
+            frame->cos_heading,
+            frame->sin_heading,
+            corners);
+        for (int corner_idx = 0; corner_idx < 4; corner_idx++) {
+            float corner_x, corner_y;
+            project_point_to_ego_frame(ego, corners[corner_idx][0], corners[corner_idx][1], &corner_x, &corner_y);
+            obs[obs_idx++] = corner_x / env->obs_norm_xy_offset_m;
+            obs[obs_idx++] = corner_y / env->obs_norm_xy_offset_m;
+        }
+    }
+    return obs_idx;
+}
+
+static int write_partner_obs(Drive *env, Agent *ego, int agent_idx, float *obs, int obs_idx,
+    float *history_obs, int *history_idx, int *partner_count) {
     // Partner blindness: zero partner obs for the configured duration once triggered
     if (ego->partner_blindness_counter > 0) {
         ego->partner_blindness_counter--;
@@ -3946,6 +4026,9 @@ static int write_partner_obs(Drive *env, Agent *ego, int agent_idx, float *obs, 
     if (ego->partner_blindness_counter > 0) {
         int partner_obs_stride = env->obs_slots_partners_n * PARTNER_FEATURES;
         memset(&obs[obs_idx], 0, partner_obs_stride * sizeof(float));
+        int history_stride = env->obs_slots_partners_n * env->obs_history_frames * HISTORY_FEATURES;
+        memset(&history_obs[*history_idx], 0, history_stride * sizeof(float));
+        *history_idx += history_stride;
         *partner_count = 0;
         return obs_idx + partner_obs_stride;
     }
@@ -4021,9 +4104,14 @@ static int write_partner_obs(Drive *env, Agent *ego, int agent_idx, float *obs, 
         obs[obs_idx++] = other->sim_speed_signed / env->obs_norm_speed_mps;
         // TODO(hack): partner seconds_stopped is a temporary feature; remove later.
         obs[obs_idx++] = fminf(1.0f, other->seconds_stopped / MAX_STOPPED_SECONDS);
+        *history_idx = write_actor_history_obs(env, ego, other, history_obs, *history_idx);
         partners_written++;
     }
 
+    int missing_history
+        = (env->obs_slots_partners_n - partners_written) * env->obs_history_frames * HISTORY_FEATURES;
+    memset(&history_obs[*history_idx], 0, missing_history * sizeof(float));
+    *history_idx += missing_history;
     *partner_count = partners_written;
     return obs_idx + (env->obs_slots_partners_n - partners_written) * PARTNER_FEATURES;
 }
@@ -4277,6 +4365,7 @@ static int write_traffic_control_obs(Drive *env, Agent *ego, float *obs, int obs
 }
 
 static void compute_observations(Drive *env) {
+    int base_obs_size = compute_base_observation_size(env);
     int obs_per_agent = compute_observation_size(env);
     memset(env->observations, 0, obs_per_agent * env->active_agent_count * sizeof(float));
     float (*obs_matrix)[obs_per_agent] = (float (*)[obs_per_agent]) env->observations;
@@ -4289,17 +4378,20 @@ static void compute_observations(Drive *env) {
         int boundary_count = 0;
         int traffic_control_count = 0;
         int obs_idx = 0;
+        int history_idx = base_obs_size;
 
         obs_idx = write_ego_obs(env, ego, obs, obs_idx);
         obs_idx = write_reward_target_obs(env, ego, obs, obs_idx);
-        obs_idx = write_partner_obs(env, ego, i, obs, obs_idx, &partner_count);
+        history_idx = write_actor_history_obs(env, ego, ego, obs, history_idx);
+        obs_idx = write_partner_obs(env, ego, i, obs, obs_idx, obs, &history_idx, &partner_count);
         obs_idx = write_road_obs(env, ego, obs, obs_idx, &lane_count, &boundary_count);
         obs_idx = write_traffic_control_obs(env, ego, obs, obs_idx, &traffic_control_count);
         obs[obs_idx++] = (float) lane_count;
         obs[obs_idx++] = (float) boundary_count;
         obs[obs_idx++] = (float) partner_count;
         obs[obs_idx++] = (float) traffic_control_count;
-        assert(obs_idx == obs_per_agent);
+        assert(obs_idx == base_obs_size);
+        assert(history_idx == obs_per_agent);
     }
 }
 
@@ -4555,6 +4647,7 @@ void c_reset(Drive *env) {
     if (env->timestep == 0) {
         for (int i = 0; i < env->num_total_agents; i++) {
             copy_pose_to_prev(&env->agents[i]);
+            initialize_agent_history(&env->agents[i]);
         }
         for (int x = 0; x < env->active_agent_count; x++) {
             env->logs[x] = (Log) {0};
@@ -4603,6 +4696,7 @@ void c_reset(Drive *env) {
             }
             reset_agent_metrics(env, agent_idx);
             reset_agent_state(agent);
+            initialize_agent_history(agent);
             sample_erratic_flags(env, agent);
             generate_reward_coefs(env, agent);
             compute_metrics(env, agent_idx, x);
@@ -4648,6 +4742,7 @@ void c_reset(Drive *env) {
         } else {
             generate_new_goals_from_route(env, agent);
         }
+        initialize_agent_history(agent);
         compute_metrics(env, agent_idx, x);
     }
     compute_observations(env);
@@ -4717,6 +4812,7 @@ void c_step(Drive *env) {
         } else {
             agent->seconds_stopped = 0.0f;
         }
+        push_agent_history(agent);
     }
 
     // -> 2. Compute metrics and rewards

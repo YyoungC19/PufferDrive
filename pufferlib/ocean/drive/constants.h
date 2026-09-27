@@ -224,6 +224,8 @@ static const int ROAD_OFFSETS[25][2]
 #define TRAFFIC_CONTROL_FEATURES 7
 #define GOAL_FEATURES 3
 #define OBS_VALID_COUNT_FEATURES 4
+#define HISTORY_FEATURES 15
+#define MAX_OBS_HISTORY_FRAMES 5
 // Heading deviation since last kept point that forces a keep when obs stride > 1 (~15 degrees).
 #define OBS_STRIDE_HEADING_THRESHOLD 0.2618f
 
