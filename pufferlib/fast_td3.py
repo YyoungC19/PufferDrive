@@ -6,6 +6,33 @@ import torch.nn.functional as F
 VALID_SIM_TYPES = {"", "sim_actor", "sim_critic", "sim_both"}
 
 
+def _project_distribution(logits, rewards, bootstrap, discount, support):
+    num_atoms = support.numel()
+    v_min, v_max = support[0], support[-1]
+    delta_z = (v_max - v_min) / (num_atoms - 1)
+    batch_shape = rewards.shape
+    batch_size = rewards.numel()
+    target_z = rewards.reshape(-1, 1) + (
+        bootstrap.reshape(-1, 1) * discount.reshape(-1, 1) * support
+    )
+    target_z = target_z.clamp(v_min, v_max)
+    b = (target_z - v_min) / delta_z
+    lower, upper = torch.floor(b).long(), torch.ceil(b).long()
+    equal = lower == upper
+    lower = torch.where(equal & (lower > 0), lower - 1, lower)
+    upper = torch.where(equal & (upper == 0), upper + 1, upper)
+    distribution = F.softmax(logits.reshape(batch_size, num_atoms), dim=-1)
+    projected = torch.zeros_like(distribution)
+    offset = torch.arange(batch_size, device=logits.device)[:, None] * num_atoms
+    projected.view(-1).index_add_(
+        0, (lower + offset).reshape(-1), (distribution * (upper - b)).reshape(-1)
+    )
+    projected.view(-1).index_add_(
+        0, (upper + offset).reshape(-1), (distribution * (b - lower)).reshape(-1)
+    )
+    return projected.reshape(*batch_shape, num_atoms)
+
+
 def _validate_sim_config(sim_type: str, sim_dimension: int, seq_len: int) -> None:
     if sim_type not in VALID_SIM_TYPES:
         raise ValueError(
@@ -237,6 +264,213 @@ class Critic(nn.Module):
         return torch.sum(probs * self.q_support, dim=1)
 
 
+class _RecurrentInput(nn.Module):
+    """Input encoder from pomdp-baselines' recurrent actor/critic models."""
+
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        action_embedding_size: int,
+        observation_embedding_size: int,
+        reward_embedding_size: int,
+        hidden_size: int,
+        num_layers: int,
+        device: torch.device = None,
+    ):
+        super().__init__()
+        self.obs = nn.Sequential(
+            nn.Linear(n_obs, observation_embedding_size, device=device), nn.ReLU()
+        )
+        self.action = nn.Sequential(
+            nn.Linear(n_act, action_embedding_size, device=device), nn.ReLU()
+        )
+        self.reward = None
+        if reward_embedding_size > 0:
+            self.reward = nn.Sequential(
+                nn.Linear(1, reward_embedding_size, device=device), nn.ReLU()
+            )
+        self.rnn = nn.GRU(
+            action_embedding_size + observation_embedding_size + reward_embedding_size,
+            hidden_size,
+            num_layers=num_layers,
+            device=device,
+        )
+        for name, param in self.rnn.named_parameters():
+            if "bias" in name:
+                nn.init.constant_(param, 0)
+            else:
+                nn.init.orthogonal_(param)
+
+    def forward(self, prev_actions, rewards, observations, hidden=None):
+        inputs = [self.action(prev_actions), self.obs(observations)]
+        if self.reward is not None:
+            inputs.append(self.reward(rewards))
+        return self.rnn(torch.cat(inputs, dim=-1), hidden)
+
+
+class _RecurrentActorMixin:
+    """FastTD3 actor with the separate-GRU architecture from pomdp-baselines."""
+
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        recurrent_action_embedding_size: int,
+        recurrent_observation_embedding_size: int,
+        recurrent_reward_embedding_size: int,
+        recurrent_hidden_size: int,
+        recurrent_num_layers: int,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(
+            n_obs=recurrent_hidden_size + recurrent_observation_embedding_size,
+            n_act=n_act,
+            *args,
+            **kwargs,
+        )
+        device = kwargs.get("device")
+        self.recurrent = _RecurrentInput(
+            n_obs,
+            n_act,
+            recurrent_action_embedding_size,
+            recurrent_observation_embedding_size,
+            recurrent_reward_embedding_size,
+            recurrent_hidden_size,
+            recurrent_num_layers,
+            device,
+        )
+        self.current_observation = nn.Sequential(
+            nn.Linear(n_obs, recurrent_observation_embedding_size, device=device),
+            nn.ReLU(),
+        )
+        self.recurrent_hidden_size = recurrent_hidden_size
+        self.recurrent_num_layers = recurrent_num_layers
+
+    def initial_state(self, batch_size):
+        return torch.zeros(
+            self.recurrent_num_layers,
+            batch_size,
+            self.recurrent_hidden_size,
+            device=self.device,
+        )
+
+    def forward(
+        self,
+        obs,
+        prev_actions=None,
+        rewards=None,
+        hidden=None,
+        return_hidden=False,
+    ):
+        single_step = obs.dim() == 2
+        if single_step:
+            obs = obs.unsqueeze(0)
+        if prev_actions is None:
+            prev_actions = obs.new_zeros((*obs.shape[:-1], self.n_act))
+        elif single_step:
+            prev_actions = prev_actions.unsqueeze(0)
+        if rewards is None:
+            rewards = obs.new_zeros((*obs.shape[:-1], 1))
+        elif single_step and rewards.dim() == 2:
+            rewards = rewards.unsqueeze(0)
+        recurrent, next_hidden = self.recurrent(prev_actions, rewards, obs, hidden)
+        action = super().forward(
+            torch.cat((recurrent, self.current_observation(obs)), dim=-1)
+        )
+        if single_step:
+            action = action.squeeze(0)
+        return (action, next_hidden) if return_hidden else action
+
+    def explore(self, obs, dones=None, deterministic=False, **recurrent_state):
+        if dones is not None and dones.sum() > 0:
+            new_scales = (
+                torch.rand(self.n_envs, 1, device=obs.device)
+                * (self.std_max - self.std_min)
+                + self.std_min
+            )
+            self.noise_scales.copy_(
+                torch.where(dones.view(-1, 1) > 0, new_scales, self.noise_scales)
+            )
+        action, hidden = self(
+            obs,
+            return_hidden=True,
+            **recurrent_state,
+        )
+        if not deterministic:
+            action = action + torch.randn_like(action) * self.noise_scales
+        return action, hidden
+
+
+class RecurrentCritic(Critic):
+    """FastTD3 distributional twin critic with pomdp-baselines' GRU state."""
+
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        recurrent_action_embedding_size: int,
+        recurrent_observation_embedding_size: int,
+        recurrent_reward_embedding_size: int,
+        recurrent_hidden_size: int,
+        recurrent_num_layers: int,
+        *args,
+        **kwargs,
+    ):
+        shortcut_size = (
+            recurrent_action_embedding_size
+            + recurrent_observation_embedding_size
+            + recurrent_reward_embedding_size
+        )
+        super().__init__(
+            n_obs=recurrent_hidden_size + shortcut_size,
+            n_act=0,
+            *args,
+            **kwargs,
+        )
+        device = kwargs.get("device")
+        self.recurrent = _RecurrentInput(
+            n_obs,
+            n_act,
+            recurrent_action_embedding_size,
+            recurrent_observation_embedding_size,
+            recurrent_reward_embedding_size,
+            recurrent_hidden_size,
+            recurrent_num_layers,
+            device,
+        )
+        self.current_observation_action = nn.Sequential(
+            nn.Linear(n_obs + n_act, shortcut_size, device=device), nn.ReLU()
+        )
+
+    def forward(self, prev_actions, rewards, observations, current_actions):
+        recurrent, _ = self.recurrent(prev_actions, rewards, observations)
+        if current_actions.shape[0] == observations.shape[0]:
+            current_observations = observations
+        else:
+            recurrent = recurrent[:-1]
+            current_observations = observations[:-1]
+        shortcut = self.current_observation_action(
+            torch.cat((current_observations, current_actions), dim=-1)
+        )
+        features = torch.cat((recurrent, shortcut), dim=-1)
+        shape = features.shape[:-1]
+        features = features.reshape(-1, features.shape[-1])
+        empty_actions = features.new_empty((features.shape[0], 0))
+        q1, q2 = super().forward(features, empty_actions)
+        return q1.reshape(*shape, -1), q2.reshape(*shape, -1)
+
+    def get_value(self, probs):
+        return torch.sum(probs * self.q_support, dim=-1)
+
+    def projection_from_logits(self, q1, q2, rewards, bootstrap, discount):
+        return (
+            _project_distribution(q1, rewards, bootstrap, discount, self.q_support),
+            _project_distribution(q2, rewards, bootstrap, discount, self.q_support),
+        )
+
+
 class Actor(nn.Module):
     def __init__(
         self,
@@ -330,6 +564,10 @@ class Actor(nn.Module):
 
         noise = torch.randn_like(act) * self.noise_scales
         return act + noise
+
+
+class RecurrentActor(_RecurrentActorMixin, Actor):
+    pass
 
 
 class MultiTaskActor(Actor):

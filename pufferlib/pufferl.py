@@ -2230,7 +2230,11 @@ def _run_eval_rollout(
                 device=device,
             )
         recurrent_state = None
-        if args["train"].get("use_rnn", False):
+        if hasattr(uncompiled_policy, "initial_eval_state"):
+            recurrent_state = uncompiled_policy.initial_eval_state(
+                inference_agents_per_batch, device
+            )
+        elif args["train"].get("use_rnn", False):
             recurrent_state = {
                 "lstm_h": torch.zeros(inference_agents_per_batch, policy.hidden_size, device=device),
                 "lstm_c": torch.zeros(inference_agents_per_batch, policy.hidden_size, device=device),
@@ -2260,7 +2264,10 @@ def _run_eval_rollout(
                 else:
                     policy_obs_tensor = environment_obs_tensor
                 if getattr(uncompiled_policy, "is_deterministic", False):
-                    raw_action = policy_forward_eval(policy_obs_tensor)[:agents_per_batch].float().cpu().numpy()
+                    raw_action = policy_forward_eval(
+                        policy_obs_tensor, recurrent_state
+                    ) if recurrent_state is not None else policy_forward_eval(policy_obs_tensor)
+                    raw_action = raw_action[:agents_per_batch].float().cpu().numpy()
                     raw_action = raw_action.reshape(vecenv.action_space.shape)
                     action = raw_action
                     logits = value = logprob = entropy = None
@@ -2300,15 +2307,22 @@ def _run_eval_rollout(
                     entropy,
                 )
 
-            obs, _, terminals, truncations, infos = vecenv.step(action)
+            obs, rewards, terminals, truncations, infos = vecenv.step(action)
             if recurrent_state is not None:
                 finished_agent_mask = torch.as_tensor(
                     np.logical_or(terminals, truncations),
                     dtype=torch.bool,
                     device=device,
                 ).reshape(agents_per_batch, 1)
-                recurrent_state["lstm_h"][:agents_per_batch].masked_fill_(finished_agent_mask, 0)
-                recurrent_state["lstm_c"][:agents_per_batch].masked_fill_(finished_agent_mask, 0)
+                if hasattr(uncompiled_policy, "update_eval_state"):
+                    uncompiled_policy.update_eval_state(
+                        recurrent_state,
+                        torch.as_tensor(rewards, device=device),
+                        finished_agent_mask.squeeze(1),
+                    )
+                else:
+                    recurrent_state["lstm_h"][:agents_per_batch].masked_fill_(finished_agent_mask, 0)
+                    recurrent_state["lstm_c"][:agents_per_batch].masked_fill_(finished_agent_mask, 0)
             for worker_info in infos:
                 worker_items = worker_info if isinstance(worker_info, list) else [worker_info]
                 for item in worker_items:

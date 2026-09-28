@@ -454,6 +454,62 @@ class SimpleReplayBuffer(nn.Module):
         return out
 
 
+    @torch.no_grad()
+    def sample_sequences(self, batch_size: int, sequence_length: int):
+        """Sample time-major subsequences with the episode mask used by pomdp-baselines."""
+        if not self.masked or self.n_steps != 1 or self.asymmetric_obs:
+            raise NotImplementedError(
+                "Recurrent PufferDrive replay requires masked, one-step, symmetric transitions"
+            )
+
+        counts = self.valid_counts.clamp(max=self.buffer_size)
+        eligible = torch.nonzero(counts >= sequence_length, as_tuple=True)[0]
+        if eligible.numel() == 0:
+            raise RuntimeError(
+                f"No replay sequence with {sequence_length} transitions is available"
+            )
+
+        rows = eligible[
+            torch.randint(eligible.numel(), (batch_size,), device=self.device)
+        ]
+        row_counts = counts[rows]
+        starts = (
+            torch.rand(batch_size, device=self.device)
+            * (row_counts - sequence_length + 1)
+        ).long()
+        oldest = (self.valid_counts[rows] - row_counts) % self.buffer_size
+        offsets = torch.arange(sequence_length, device=self.device)[:, None]
+        slots = (oldest[None] + starts[None] + offsets) % self.buffer_size
+        rows = rows[None].expand(sequence_length, -1)
+
+        dones = self.dones[rows, slots]
+        truncations = self.truncations[rows, slots]
+        boundaries = (dones | truncations).bool()
+        mask = torch.cumprod(
+            torch.cat(
+                (torch.ones_like(boundaries[:1]), (~boundaries[:-1]).long()),
+                dim=0,
+            ),
+            dim=0,
+        ).float()
+
+        return TensorDict(
+            {
+                "observations": self.observations[rows, slots],
+                "actions": self.actions[rows, slots],
+                "mask": mask,
+                "next": {
+                    "observations": self.next_observations[rows, slots],
+                    "rewards": self.rewards[rows, slots],
+                    "dones": dones,
+                    "truncations": truncations,
+                    "effective_n_steps": torch.ones_like(dones),
+                },
+            },
+            batch_size=(sequence_length, batch_size),
+        )
+
+
 class EmpiricalNormalization(nn.Module):
     """Normalize mean and variance of values based on empirical values."""
 

@@ -281,10 +281,16 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from pufferlib.fast_td3 import Actor, Critic
+            if args.recurrent:
+                from pufferlib.fast_td3 import RecurrentActor, RecurrentCritic
 
-            actor_cls = Actor
-            critic_cls = Critic
+                actor_cls = RecurrentActor
+                critic_cls = RecurrentCritic
+            else:
+                from pufferlib.fast_td3 import Actor, Critic
+
+                actor_cls = Actor
+                critic_cls = Critic
 
         actor_kwargs.update(
             {
@@ -300,8 +306,18 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
                 "seq_len": args.critic_seq_len,
             }
         )
+        if args.recurrent:
+            recurrent_kwargs = {
+                "recurrent_action_embedding_size": args.recurrent_action_embedding_size,
+                "recurrent_observation_embedding_size": args.recurrent_observation_embedding_size,
+                "recurrent_reward_embedding_size": args.recurrent_reward_embedding_size,
+                "recurrent_hidden_size": args.recurrent_hidden_size,
+                "recurrent_num_layers": args.recurrent_num_layers,
+            }
+            actor_kwargs.update(recurrent_kwargs)
+            critic_kwargs.update(recurrent_kwargs)
 
-        print("Using FastTD3")
+        print("Using recurrent FastTD3" if args.recurrent else "Using FastTD3")
     elif args.agent == "fasttd3_simbav2":
         if args.sim_type:
             raise ValueError("SimNorm options are only supported with agent='fasttd3'")
@@ -400,7 +416,130 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     policy_noise = args.policy_noise
     noise_clip = args.noise_clip
 
+    def recurrent_inputs(data):
+        observations = torch.cat(
+            (data["observations"][:1], data["next"]["observations"]), dim=0
+        )
+        actions = torch.cat(
+            (data["actions"].new_zeros((1, *data["actions"].shape[1:])), data["actions"]),
+            dim=0,
+        )
+        rewards = torch.cat(
+            (
+                data["next"]["rewards"].new_zeros((1, data.batch_size[1], 1)),
+                data["next"]["rewards"].unsqueeze(-1),
+            ),
+            dim=0,
+        )
+        return observations, actions, rewards, data["mask"].float()
+
+    def update_main_recurrent(data, logs_dict):
+        with autocast(
+            device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
+        ):
+            observations, actions, recurrent_rewards, mask = recurrent_inputs(data)
+            rewards = data["next"]["rewards"]
+            dones = data["next"]["dones"].bool()
+            truncations = data["next"]["truncations"].bool()
+            bootstrap = (~dones).float() if args.disable_bootstrap else (truncations | ~dones).float()
+            discount = args.gamma ** data["next"]["effective_n_steps"]
+
+            with torch.no_grad():
+                next_actions = actor(
+                    observations,
+                    prev_actions=actions,
+                    rewards=recurrent_rewards,
+                )
+                noise = torch.randn_like(next_actions).mul(policy_noise).clamp(
+                    -noise_clip, noise_clip
+                )
+                next_actions = (next_actions + noise).clamp(action_low, action_high)
+                q1_next, q2_next = qnet_target(
+                    actions, recurrent_rewards, observations, next_actions
+                )
+                qf1_next_target_dist, qf2_next_target_dist = qnet_target.projection_from_logits(
+                    q1_next[1:], q2_next[1:], rewards, bootstrap, discount
+                )
+                qf1_next_target_value = qnet_target.get_value(qf1_next_target_dist)
+                qf2_next_target_value = qnet_target.get_value(qf2_next_target_dist)
+                if args.use_cdq:
+                    use_q1 = qf1_next_target_value < qf2_next_target_value
+                    qf_next_target_dist = torch.where(
+                        use_q1.unsqueeze(-1),
+                        qf1_next_target_dist,
+                        qf2_next_target_dist,
+                    )
+                    qf1_next_target_dist = qf2_next_target_dist = qf_next_target_dist
+
+            qf1, qf2 = qnet(actions, recurrent_rewards, observations, data["actions"])
+            qf1_loss = -torch.sum(
+                qf1_next_target_dist * F.log_softmax(qf1, dim=-1), dim=-1
+            )
+            qf2_loss = -torch.sum(
+                qf2_next_target_dist * F.log_softmax(qf2, dim=-1), dim=-1
+            )
+            valid = mask.sum().clamp_min(1.0)
+            qf_loss = ((qf1_loss + qf2_loss) * mask).sum() / valid
+
+        q_optimizer.zero_grad(set_to_none=True)
+        scaler.scale(qf_loss).backward()
+        scaler.unscale_(q_optimizer)
+        if args.use_grad_norm_clipping:
+            critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                qnet.parameters(),
+                max_norm=args.max_grad_norm if args.max_grad_norm > 0 else float("inf"),
+            )
+        else:
+            critic_grad_norm = torch.tensor(0.0, device=device)
+        scaler.step(q_optimizer)
+        scaler.update()
+        logs_dict["critic_grad_norm"] = critic_grad_norm.detach()
+        logs_dict["qf_loss"] = qf_loss.detach()
+        logs_dict["qf_max"] = qf1_next_target_value.max().detach()
+        logs_dict["qf_min"] = qf1_next_target_value.min().detach()
+        return logs_dict
+
+    def update_pol_recurrent(data, logs_dict):
+        with autocast(
+            device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
+        ):
+            observations, actions, recurrent_rewards, mask = recurrent_inputs(data)
+            policy_actions = actor(
+                observations,
+                prev_actions=actions,
+                rewards=recurrent_rewards,
+            )
+            qf1, qf2 = qnet(
+                actions, recurrent_rewards, observations, policy_actions
+            )
+            qf1_value = qnet.get_value(F.softmax(qf1[:-1], dim=-1))
+            qf2_value = qnet.get_value(F.softmax(qf2[:-1], dim=-1))
+            qf_value = (
+                torch.minimum(qf1_value, qf2_value)
+                if args.use_cdq
+                else (qf1_value + qf2_value) / 2.0
+            )
+            actor_loss = -(qf_value * mask).sum() / mask.sum().clamp_min(1.0)
+
+        actor_optimizer.zero_grad(set_to_none=True)
+        scaler.scale(actor_loss).backward()
+        scaler.unscale_(actor_optimizer)
+        if args.use_grad_norm_clipping:
+            actor_grad_norm = torch.nn.utils.clip_grad_norm_(
+                actor.parameters(),
+                max_norm=args.max_grad_norm if args.max_grad_norm > 0 else float("inf"),
+            )
+        else:
+            actor_grad_norm = torch.tensor(0.0, device=device)
+        scaler.step(actor_optimizer)
+        scaler.update()
+        logs_dict["actor_grad_norm"] = actor_grad_norm.detach()
+        logs_dict["actor_loss"] = actor_loss.detach()
+        return logs_dict
+
     def update_main(data, logs_dict):
+        if args.recurrent:
+            return update_main_recurrent(data, logs_dict)
         with autocast(
             device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
         ):
@@ -487,6 +626,8 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         return logs_dict
 
     def update_pol(data, logs_dict):
+        if args.recurrent:
+            return update_pol_recurrent(data, logs_dict)
         with autocast(
             device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
         ):
@@ -556,6 +697,14 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         * (actor_detach.std_max - actor_detach.std_min)
         + actor_detach.std_min
     )
+    if args.recurrent:
+        recurrent_hidden_by_id = actor_detach.initial_state(vecenv.num_agents)
+        previous_actions_by_id = torch.zeros(
+            vecenv.num_agents, n_act, device=device
+        )
+        previous_rewards_by_id = torch.zeros(
+            vecenv.num_agents, 1, device=device
+        )
     if args.checkpoint_path:
         # Load checkpoint if specified
         torch_checkpoint = torch.load(
@@ -609,10 +758,27 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
             else:
                 norm_obs = normalize_obs(obs)
             actor_detach.noise_scales.copy_(noise_scales_by_id[current_ids])
-            actions = policy(obs=norm_obs, dones=dones)
+            if args.recurrent:
+                actions, next_hidden = policy(
+                    obs=norm_obs,
+                    dones=dones,
+                    prev_actions=previous_actions_by_id[current_ids],
+                    rewards=previous_rewards_by_id[current_ids],
+                    hidden=recurrent_hidden_by_id[:, current_ids],
+                )
+                recurrent_hidden_by_id[:, current_ids] = next_hidden
+            else:
+                actions = policy(obs=norm_obs, dones=dones)
             noise_scales_by_id[current_ids] = actor_detach.noise_scales
 
         next_obs, rewards, dones, infos = envs.step(actions.float())
+        if args.recurrent:
+            previous_actions_by_id[current_ids] = actions
+            previous_rewards_by_id[current_ids] = rewards.unsqueeze(-1)
+            finished = current_ids[dones]
+            recurrent_hidden_by_id[:, finished] = 0
+            previous_actions_by_id[finished] = 0
+            previous_rewards_by_id[finished] = 0
         obs_stat_source = next_obs[..., obs_stats_feature_idx]
         env_stats["obs/max"].append(obs_stat_source.max().item())
         env_stats["obs/min"].append(obs_stat_source.min().item())
@@ -678,9 +844,19 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         if envs.asymmetric_obs:
             critic_obs = next_critic_obs
 
-        if global_step > args.learning_starts:
+        learning_starts = max(
+            args.learning_starts,
+            args.recurrent_seq_len if args.recurrent else 0,
+        )
+        if global_step > learning_starts:
             for i in range(args.num_updates):
-                data = rb.sample(max(1, args.batch_size // args.num_envs))
+                if args.recurrent:
+                    data = rb.sample_sequences(
+                        max(1, args.batch_size // args.recurrent_seq_len),
+                        args.recurrent_seq_len,
+                    )
+                else:
+                    data = rb.sample(max(1, args.batch_size // args.num_envs))
                 data["observations"] = normalize_obs(data["observations"])
                 data["next"]["observations"] = normalize_obs(
                     data["next"]["observations"]

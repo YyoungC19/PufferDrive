@@ -321,6 +321,14 @@ fast_td3:
   sim_dimension: 64
   critic_seq_len: 8
   actor_seq_len: 8
+  # Recurrent TD3 defaults from twni2016/pomdp-baselines.
+  recurrent: true
+  recurrent_seq_len: 64
+  recurrent_action_embedding_size: 16
+  recurrent_observation_embedding_size: 32
+  recurrent_reward_embedding_size: 0
+  recurrent_hidden_size: 128
+  recurrent_num_layers: 1
   save_interval: 5000
 sweep:
   method: Protein
