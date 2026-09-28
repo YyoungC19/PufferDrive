@@ -859,10 +859,20 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
                     )
                 else:
                     data = rb.sample(max(1, args.batch_size // args.num_envs))
-                data["observations"] = normalize_obs(data["observations"])
-                data["next"]["observations"] = normalize_obs(
-                    data["next"]["observations"]
-                )
+                if args.recurrent:
+                    observations = data["observations"]
+                    next_observations = data["next"]["observations"]
+                    data["observations"] = normalize_obs(
+                        observations.flatten(0, 1)
+                    ).view_as(observations)
+                    data["next"]["observations"] = normalize_obs(
+                        next_observations.flatten(0, 1)
+                    ).view_as(next_observations)
+                else:
+                    data["observations"] = normalize_obs(data["observations"])
+                    data["next"]["observations"] = normalize_obs(
+                        data["next"]["observations"]
+                    )
                 if envs.asymmetric_obs:
                     data["critic_observations"] = normalize_critic_obs(
                         data["critic_observations"]
