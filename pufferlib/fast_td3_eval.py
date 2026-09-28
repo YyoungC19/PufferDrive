@@ -61,7 +61,7 @@ class FastTD3EvalPolicy(nn.Module):
             hidden=state["hidden"],
             return_hidden=True,
         )
-        state["hidden"].copy_(hidden)
+        state["hidden"].copy_(hidden.to(state["hidden"].dtype))
         state["prev_action"].copy_(action)
         return action
 

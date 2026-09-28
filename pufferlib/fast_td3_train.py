@@ -766,7 +766,9 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
                     rewards=previous_rewards_by_id[current_ids],
                     hidden=recurrent_hidden_by_id[:, current_ids],
                 )
-                recurrent_hidden_by_id[:, current_ids] = next_hidden
+                recurrent_hidden_by_id[:, current_ids] = next_hidden.to(
+                    recurrent_hidden_by_id.dtype
+                )
             else:
                 actions = policy(obs=norm_obs, dones=dones)
             noise_scales_by_id[current_ids] = actor_detach.noise_scales
