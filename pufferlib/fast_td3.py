@@ -6,6 +6,105 @@ import torch.nn.functional as F
 VALID_SIM_TYPES = {"", "sim_actor", "sim_critic", "sim_both"}
 
 
+def _layer_init(layer: nn.Module, std: float = 2**0.5) -> nn.Module:
+    nn.init.orthogonal_(layer.weight, std)
+    nn.init.constant_(layer.bias, 0.0)
+    return layer
+
+
+class DriveRLTemporalEncoder(nn.Module):
+    """DriveRL agent-history encoder adapted to PufferDrive's flat observation API."""
+
+    def __init__(
+        self,
+        n_obs: int,
+        history_agents: int = 0,
+        history_frames: int = 0,
+        history_features: int = 0,
+        embed_dim: int = 256,
+        num_heads: int = 4,
+        num_attention_layers: int = 2,
+        device: torch.device = None,
+    ):
+        super().__init__()
+        self.history_agents = history_agents
+        self.history_frames = history_frames
+        self.history_features = history_features
+        self.history_dim = history_agents * history_frames * history_features
+        self.base_dim = n_obs - self.history_dim
+        self.enabled = self.history_dim > 0
+        self.output_dim = self.base_dim + embed_dim if self.enabled else n_obs
+
+        if not self.enabled:
+            return
+        if self.base_dim <= 0 or history_frames < 2:
+            raise ValueError("Invalid DriveRL temporal observation layout")
+
+        self.frame_mlp = nn.Sequential(
+            _layer_init(nn.Linear(history_features + 1, embed_dim // 4, device=device)),
+            nn.ReLU(),
+            _layer_init(nn.Linear(embed_dim // 4, embed_dim, device=device)),
+        )
+        self.attention_layers = nn.ModuleList(
+            nn.ModuleDict(
+                {
+                    "ln1": nn.LayerNorm(embed_dim, device=device),
+                    "attention": nn.MultiheadAttention(
+                        embed_dim, num_heads, batch_first=True, device=device
+                    ),
+                    "ln2": nn.LayerNorm(embed_dim, device=device),
+                    "ffn": nn.Sequential(
+                        _layer_init(nn.Linear(embed_dim, embed_dim * 4, device=device)),
+                        nn.ReLU(),
+                        _layer_init(nn.Linear(embed_dim * 4, embed_dim, device=device)),
+                    ),
+                }
+            )
+            for _ in range(num_attention_layers)
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        if not self.enabled:
+            return obs
+
+        base_obs = obs[..., : self.base_dim]
+        history = obs[..., self.base_dim :].reshape(
+            *obs.shape[:-1], self.history_agents, self.history_frames, self.history_features
+        )
+        frame_mask = history.abs().amax(dim=-1) > 0
+        time = torch.arange(
+            self.history_frames, dtype=history.dtype, device=history.device
+        ) / (self.history_frames - 1)
+        time = time.view(*([1] * (history.dim() - 2)), self.history_frames, 1)
+        time = time.expand(*history.shape[:-1], 1) * frame_mask.unsqueeze(-1)
+
+        frame_embeddings = self.frame_mlp(torch.cat([history, time], dim=-1))
+        valid_frames = frame_mask.unsqueeze(-1)
+        frame_embeddings = frame_embeddings.masked_fill(~valid_frames, -torch.inf)
+        agent_embeddings = frame_embeddings.amax(dim=-2)
+        agent_valid = frame_mask.any(dim=-1)
+        agent_embeddings = agent_embeddings.masked_fill(~agent_valid.unsqueeze(-1), 0)
+
+        ego_embedding = agent_embeddings[..., :1, :]
+        key_padding_mask = ~agent_valid
+        for layer in self.attention_layers:
+            query = layer["ln1"](ego_embedding)
+            key_value = layer["ln1"](agent_embeddings)
+            attention, _ = layer["attention"](
+                query,
+                key_value,
+                key_value,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+            )
+            ego_embedding = ego_embedding + attention
+            ego_embedding = ego_embedding + layer["ffn"](
+                layer["ln2"](ego_embedding)
+            )
+
+        return torch.cat([base_obs, ego_embedding.squeeze(-2)], dim=-1)
+
+
 def _validate_sim_config(sim_type: str, sim_dimension: int, seq_len: int) -> None:
     if sim_type not in VALID_SIM_TYPES:
         raise ValueError(
@@ -69,12 +168,18 @@ class DistributionalQNetwork(nn.Module):
         sim_dimension: int,
         seq_len: int,
         device: torch.device = None,
+        history_agents: int = 0,
+        history_frames: int = 0,
+        history_features: int = 0,
     ):
         super().__init__()
         _validate_sim_config(sim_type, sim_dimension, seq_len)
 
+        self.obs_encoder = DriveRLTemporalEncoder(
+            n_obs, history_agents, history_frames, history_features, device=device
+        )
         self.net = nn.Sequential(
-            nn.Linear(n_obs + n_act, hidden_dim, device=device),
+            nn.Linear(self.obs_encoder.output_dim + n_act, hidden_dim, device=device),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim // 2, device=device),
             nn.ReLU(),
@@ -102,7 +207,7 @@ class DistributionalQNetwork(nn.Module):
         self.num_atoms = num_atoms
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([obs, actions], 1)
+        x = torch.cat([self.obs_encoder(obs), actions], 1)
         x = self.net(x)
         x = self.fc_head(x)
         return x
@@ -168,6 +273,9 @@ class Critic(nn.Module):
         sim_dimension: int,
         seq_len: int,
         device: torch.device = None,
+        history_agents: int = 0,
+        history_frames: int = 0,
+        history_features: int = 0,
     ):
         super().__init__()
         self.qnet1 = DistributionalQNetwork(
@@ -181,6 +289,9 @@ class Critic(nn.Module):
             sim_dimension=sim_dimension,
             seq_len=seq_len,
             device=device,
+            history_agents=history_agents,
+            history_frames=history_frames,
+            history_features=history_features,
         )
         self.qnet2 = DistributionalQNetwork(
             n_obs=n_obs,
@@ -193,6 +304,9 @@ class Critic(nn.Module):
             sim_dimension=sim_dimension,
             seq_len=seq_len,
             device=device,
+            history_agents=history_agents,
+            history_frames=history_frames,
+            history_features=history_features,
         )
 
         self.register_buffer(
@@ -251,13 +365,19 @@ class Actor(nn.Module):
         sim_dimension: int = 64,
         seq_len: int = 8,
         device: torch.device = None,
+        history_agents: int = 0,
+        history_frames: int = 0,
+        history_features: int = 0,
     ):
         super().__init__()
         _validate_sim_config(sim_type, sim_dimension, seq_len)
 
         self.n_act = n_act
+        self.obs_encoder = DriveRLTemporalEncoder(
+            n_obs, history_agents, history_frames, history_features, device=device
+        )
         self.net = nn.Sequential(
-            nn.Linear(n_obs, hidden_dim, device=device),
+            nn.Linear(self.obs_encoder.output_dim, hidden_dim, device=device),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim // 2, device=device),
             nn.ReLU(),
@@ -300,7 +420,7 @@ class Actor(nn.Module):
         self.device = device
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        x = obs
+        x = self.obs_encoder(obs)
         x_net = self.net(x)
         x_head = self.fc_head(x_net)
         action = self.fc_mu(x_head)

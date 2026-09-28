@@ -21,7 +21,7 @@ import wandb
 import numpy as np
 
 try:
-    # Required for avoiding IsaacGym import error
+    # Required for avoiding IsaacGym import erro
     import isaacgym
 except ImportError:
     pass
@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast, GradScale
 
 from tensordict import TensorDict
 
@@ -220,14 +220,47 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         n_critic_obs = n_obs
     action_low, action_high = -1.0, 1.0
 
+    driver_env = vecenv.driver_env
+    history_frames = int(getattr(driver_env, "obs_history_frames", 0))
+    history_features = int(getattr(driver_env, "history_features", 0))
+    history_agents = int(getattr(driver_env, "obs_slots_partners_n", 0)) + 1
+    history_dim = history_agents * history_frames * history_features
+    if history_frames <= 1:
+        history_agents = history_frames = history_features = history_dim = 0
+    base_n_obs = n_obs - history_dim
+    if base_n_obs <= 0:
+        raise ValueError("Invalid PufferDrive temporal observation layout")
+
     if args.obs_normalization:
-        obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
+        # PufferDrive already bounds the 15-D DriveRL history features. Keep
+        # zero padding intact for frame masks and normalize only the original
+        # PufferDrive observation prefix.
+        obs_normalizer = EmpiricalNormalization(shape=base_n_obs, device=device)
         critic_obs_normalizer = EmpiricalNormalization(
-            shape=n_critic_obs, device=device
+            shape=base_n_obs if not envs.asymmetric_obs else n_critic_obs,
+            device=device,
         )
     else:
         obs_normalizer = nn.Identity()
         critic_obs_normalizer = nn.Identity()
+
+    def normalize_obs_impl(x, update=True):
+        if not args.obs_normalization:
+            return x
+        if history_dim == 0:
+            return obs_normalizer(x, update=update)
+        normalized_base = obs_normalizer(x[..., :base_n_obs], update=update)
+        return torch.cat([normalized_base, x[..., base_n_obs:]], dim=-1)
+
+    def normalize_critic_obs_impl(x, update=True):
+        if not args.obs_normalization:
+            return x
+        if history_dim == 0 or envs.asymmetric_obs:
+            return critic_obs_normalizer(x, update=update)
+        normalized_base = critic_obs_normalizer(
+            x[..., :base_n_obs], update=update
+        )
+        return torch.cat([normalized_base, x[..., base_n_obs:]], dim=-1)
 
     if args.reward_normalization:
         if env_type in ["mtbench"]:
@@ -278,12 +311,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         if env_type in ["mtbench"]:
             from pufferlib.fast_td3 import MultiTaskActor, MultiTaskCritic
 
-            actor_cls = MultiTaskActor
+            actor_cls = MultiTaskActo
             critic_cls = MultiTaskCritic
         else:
             from pufferlib.fast_td3 import Actor, Critic
 
-            actor_cls = Actor
+            actor_cls = Acto
             critic_cls = Critic
 
         actor_kwargs.update(
@@ -300,6 +333,14 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
                 "seq_len": args.critic_seq_len,
             }
         )
+        if history_dim:
+            temporal_kwargs = {
+                "history_agents": history_agents,
+                "history_frames": history_frames,
+                "history_features": history_features,
+            }
+            actor_kwargs.update(temporal_kwargs)
+            critic_kwargs.update(temporal_kwargs)
 
         print("Using FastTD3")
     elif args.agent == "fasttd3_simbav2":
@@ -309,12 +350,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         if env_type in ["mtbench"]:
             from fast_td3_simbav2 import MultiTaskActor, MultiTaskCritic
 
-            actor_cls = MultiTaskActor
+            actor_cls = MultiTaskActo
             critic_cls = MultiTaskCritic
         else:
             from fast_td3_simbav2 import Actor, Critic
 
-            actor_cls = Actor
+            actor_cls = Acto
             critic_cls = Critic
 
         print("Using FastTD3 + SimbaV2")
@@ -534,14 +575,14 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         update_main = torch.compile(update_main, mode=compile_mode)
         update_pol = torch.compile(update_pol, mode=compile_mode)
         policy = torch.compile(policy, mode=None)
-        normalize_obs = torch.compile(obs_normalizer.forward, mode=None)
-        normalize_critic_obs = torch.compile(critic_obs_normalizer.forward, mode=None)
+        normalize_obs = torch.compile(normalize_obs_impl, mode=None)
+        normalize_critic_obs = torch.compile(normalize_critic_obs_impl, mode=None)
         if args.reward_normalization:
             update_stats = torch.compile(reward_normalizer.update_stats, mode=None)
         normalize_reward = torch.compile(reward_normalizer.forward, mode=None)
     else:
-        normalize_obs = obs_normalizer.forward
-        normalize_critic_obs = critic_obs_normalizer.forward
+        normalize_obs = normalize_obs_impl
+        normalize_critic_obs = normalize_critic_obs_impl
         if args.reward_normalization:
             update_stats = reward_normalizer.update_stats
         normalize_reward = reward_normalizer.forward
@@ -604,7 +645,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
             if args.obs_normalization:
                 active = ~envs.agent_dead[current_ids]
                 if bool(active.any()):
-                    obs_normalizer.update(obs[active])
+                    obs_normalizer.update(obs[active, :base_n_obs])
                 norm_obs = normalize_obs(obs, update=False)
             else:
                 norm_obs = normalize_obs(obs)
