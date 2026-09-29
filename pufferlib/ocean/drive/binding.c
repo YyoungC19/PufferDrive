@@ -2136,7 +2136,7 @@ static int my_log(PyObject *dict, Env *env, Log *log, float n) {
     float total_infractions = log->total_infractions * n;
     float avg_distance_per_infraction = total_distance_travelled / fmaxf(1.0f, total_infractions);
 
-    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+    if (is_drivezero_reward_type(env->reward_type)) {
         assign_to_dict(dict, "n", log->n);
         assign_to_dict(dict, "offroad_rate", log->offroad_rate);
         assign_to_dict(dict, "collision_rate", log->collision_rate);
@@ -2151,6 +2151,9 @@ static int my_log(PyObject *dict, Env *env, Log *log, float n) {
         assign_to_dict(dict, "reward_components/hard", log->reward_drivezero_hard);
         assign_to_dict(dict, "reward_components/goal", log->reward_goal);
         assign_to_dict(dict, "reward_components/soft", log->reward_drivezero_soft);
+        if (env->reward_type == REWARD_TYPE_DRIVEZERO_PROGRESS) {
+            assign_to_dict(dict, "reward_components/progress", log->reward_carl_progress);
+        }
         assign_to_dict(dict, "drivezero/cross_lane", log->drivezero_cross_lane);
         assign_to_dict(dict, "drivezero/centerline", log->drivezero_centerline);
         assign_to_dict(dict, "drivezero/curb", log->drivezero_curb);

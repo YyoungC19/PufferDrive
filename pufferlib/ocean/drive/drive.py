@@ -154,6 +154,7 @@ class Drive(pufferlib.PufferEnv):
         self.reward_type = {
             "puffer": binding.REWARD_TYPE_PUFFER,
             "drivezero": binding.REWARD_TYPE_DRIVEZERO,
+            "drivezero_progress": binding.REWARD_TYPE_DRIVEZERO_PROGRESS,
         }[reward_type]
         self.goal_radius = goal_radius
         self.min_goal_spacing = min_goal_spacing
@@ -168,7 +169,7 @@ class Drive(pufferlib.PufferEnv):
             "map": binding.GOAL_SOURCE_MAP,
             "gt": binding.GOAL_SOURCE_GT,
         }[goal_source]
-        if self.reward_type == binding.REWARD_TYPE_DRIVEZERO:
+        if self.reward_type in (binding.REWARD_TYPE_DRIVEZERO, binding.REWARD_TYPE_DRIVEZERO_PROGRESS):
             if self.goal_source != binding.GOAL_SOURCE_ROUTE or self.num_goals != 2:
                 raise ValueError("DriveZero reward requires goal_source='route' and num_goals=2")
             if abs(self.goal_radius - 1.5) > 1e-6 or terminate_on_goal:

@@ -81,6 +81,7 @@ struct Log {
     float reward_goal;
     float reward_drivezero_hard;
     float reward_drivezero_soft;
+    float reward_carl_progress;
     float drivezero_cross_lane;
     float drivezero_centerline;
     float drivezero_curb;
@@ -97,6 +98,10 @@ struct Log {
     float reward_overspeed;
     float reward_ade;
 };
+
+static inline bool is_drivezero_reward_type(int reward_type) {
+    return reward_type == REWARD_TYPE_DRIVEZERO || reward_type == REWARD_TYPE_DRIVEZERO_PROGRESS;
+}
 
 struct GridMapEntity {
     int entity_idx;    // Index into the road_elements array
@@ -633,6 +638,85 @@ static float compute_lane_progress(
     return best_progress;
 }
 
+static void initialize_carl_route_progress(Drive *env, Agent *agent) {
+    agent->carl_route_start_idx = agent->current_route_idx;
+    agent->carl_route_progress_idx = agent->current_route_idx;
+    agent->carl_route_start_progress = 0.0f;
+    agent->carl_route_total_distance = 0.0f;
+    agent->carl_route_completed_distance = 0.0f;
+    agent->carl_last_route_completion = 0.0f;
+
+    if (agent->route == NULL || agent->route_length <= 0 || agent->current_route_idx < 0
+        || agent->current_route_idx >= agent->route_length) {
+        return;
+    }
+
+    RoadMapElement *start_lane = &env->road_elements[agent->route[agent->current_route_idx]];
+    agent->carl_route_start_progress = compute_lane_progress(
+        start_lane,
+        agent->sim_x,
+        agent->sim_y,
+        agent->cos_heading,
+        agent->sin_heading,
+        true,
+        NULL);
+    agent->carl_route_total_distance = start_lane->length - agent->carl_route_start_progress;
+    for (int route_idx = agent->current_route_idx + 1; route_idx < agent->route_length; route_idx++) {
+        agent->carl_route_total_distance += env->road_elements[agent->route[route_idx]].length;
+    }
+}
+
+// CaRL: progress_t = route_completion_t - route_completion_{t-1}; completion is in [0, 100].
+static float compute_carl_progress_reward(Drive *env, Agent *agent) {
+    if (agent->route == NULL || agent->route_length <= 0 || agent->carl_route_total_distance <= 1e-6f) {
+        return 0.0f;
+    }
+
+    int start_idx = agent->carl_route_progress_idx;
+    int end_idx = start_idx + CARL_ROUTE_WINDOW_SIZE;
+    if (end_idx >= agent->route_length) {
+        end_idx = agent->route_length - 1;
+    }
+
+    int best_idx = start_idx;
+    float best_s = 0.0f;
+    float best_dist_sq = 1e30f;
+    for (int route_idx = start_idx; route_idx <= end_idx; route_idx++) {
+        float lane_dist_sq;
+        float lane_progress = compute_lane_progress(
+            &env->road_elements[agent->route[route_idx]],
+            agent->sim_x,
+            agent->sim_y,
+            agent->cos_heading,
+            agent->sin_heading,
+            true,
+            &lane_dist_sq);
+        if (lane_dist_sq < best_dist_sq) {
+            best_idx = route_idx;
+            best_s = lane_progress;
+            best_dist_sq = lane_dist_sq;
+        }
+    }
+
+    for (int route_idx = start_idx; route_idx < best_idx; route_idx++) {
+        float lane_start
+            = route_idx == agent->carl_route_start_idx ? agent->carl_route_start_progress : 0.0f;
+        agent->carl_route_completed_distance
+            += fmaxf(env->road_elements[agent->route[route_idx]].length - lane_start, 0.0f);
+    }
+    agent->carl_route_progress_idx = best_idx;
+
+    float lane_start = best_idx == agent->carl_route_start_idx ? agent->carl_route_start_progress : 0.0f;
+    float completed_distance = agent->carl_route_completed_distance + fmaxf(best_s - lane_start, 0.0f);
+    float route_completion
+        = CARL_ROUTE_COMPLETION_SCALE * clip(completed_distance / agent->carl_route_total_distance, 0.0f, 1.0f);
+    route_completion = roundf(route_completion * 100.0f) / 100.0f;
+    route_completion = fmaxf(route_completion, agent->carl_last_route_completion);
+    float progress_reward = route_completion - agent->carl_last_route_completion;
+    agent->carl_last_route_completion = route_completion;
+    return progress_reward;
+}
+
 static DepthPoint compute_z_distance_to_road_segment(const Agent *agent, const RoadMapElement *lane, int geometry_idx) {
     float dx = agent->sim_x - lane->x[geometry_idx];
     float dy = agent->sim_y - lane->y[geometry_idx];
@@ -910,6 +994,9 @@ static void commit_goals(
     agent->current_goal_x = agent->list_goal_x[start_slot_idx];
     agent->current_goal_y = agent->list_goal_y[start_slot_idx];
     agent->current_goal_z = agent->list_goal_z[start_slot_idx];
+    if (env->reward_type == REWARD_TYPE_DRIVEZERO_PROGRESS && env->goal_source == GOAL_SOURCE_ROUTE) {
+        initialize_carl_route_progress(env, agent);
+    }
 }
 
 static bool compute_new_route(Drive *env, Agent *agent, int current_lane_idx) {
@@ -2120,10 +2207,17 @@ static void compute_drivezero_reward(Drive *env, int agent_idx, int active_idx) 
     float product = q_cross_lane * q_centerline * q_curb * q_comfort * q_ttc * q_overspeed;
     float soft_reward = product / DRIVEZERO_SOFT_NORMALIZER;
 
-    env->rewards[active_idx] += hard_reward + (hard_event ? 0.0f : goal_reward + soft_reward);
+    float progress_reward = 0.0f;
+    if (env->reward_type == REWARD_TYPE_DRIVEZERO_PROGRESS) {
+        progress_reward = compute_carl_progress_reward(env, agent);
+        progress_reward = q_cross_lane > 0.0f ? progress_reward : 0.0f;
+    }
+
+    env->rewards[active_idx] += hard_reward + (hard_event ? 0.0f : goal_reward + soft_reward + progress_reward);
     agent_log->reward_drivezero_hard += hard_reward;
     agent_log->reward_goal += hard_event ? 0.0f : goal_reward;
     agent_log->reward_drivezero_soft += hard_event ? 0.0f : soft_reward;
+    agent_log->reward_carl_progress += hard_event ? 0.0f : progress_reward;
     agent_log->drivezero_cross_lane += q_cross_lane;
     agent_log->drivezero_centerline += q_centerline;
     agent_log->drivezero_curb += q_curb;
@@ -2249,6 +2343,7 @@ static void add_log(Drive *env) {
         episode_log.reward_goal += env->logs[i].reward_goal;
         episode_log.reward_drivezero_hard += env->logs[i].reward_drivezero_hard;
         episode_log.reward_drivezero_soft += env->logs[i].reward_drivezero_soft;
+        episode_log.reward_carl_progress += env->logs[i].reward_carl_progress;
         episode_log.drivezero_cross_lane += env->logs[i].drivezero_cross_lane / safe_timestep;
         episode_log.drivezero_centerline += env->logs[i].drivezero_centerline / safe_timestep;
         episode_log.drivezero_curb += env->logs[i].drivezero_curb / safe_timestep;
@@ -2333,7 +2428,7 @@ static inline void sample_erratic_flags(Drive *env, Agent *agent) {
 }
 
 static void generate_reward_coefs(Drive *env, Agent *agent) {
-    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+    if (is_drivezero_reward_type(env->reward_type)) {
         agent->reward_coefs[REWARD_COEF_GOAL_RADIUS] = env->goal_radius;
         agent->reward_coefs[REWARD_COEF_GOAL_SPEED] = env->goal_speed;
         for (int coef_idx = REWARD_COEF_COLLISION; coef_idx <= REWARD_COEF_OVERSPEED; coef_idx++) {
@@ -3638,7 +3733,7 @@ static void compute_metrics(Drive *env, int agent_idx, int log_idx) {
     if (env->traffic_lights_enabled && env->obs_slots_traffic_controls_n && check_red_light_violation(env, agent_idx)) {
         agent->metrics_array[RED_LIGHT_IDX] = 1.0f;
         apply_infraction_behavior(agent, env->traffic_light_behavior);
-        if (env->reward_type != REWARD_TYPE_DRIVEZERO) {
+        if (!is_drivezero_reward_type(env->reward_type)) {
             return;
         }
     }
@@ -3691,7 +3786,7 @@ static void compute_rewards(Drive *env, int i) {
     Log *agent_log = &env->logs[i];
     float current_ade = agent->metrics_array[AVG_DISPLACEMENT_ERROR_IDX];
 
-    if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+    if (is_drivezero_reward_type(env->reward_type)) {
         compute_drivezero_reward(env, agent_idx, i);
         if (agent->metrics_array[COLLISION_IDX] > 0.0f) {
             agent_log->collision_rate = 1.0f;
@@ -3831,7 +3926,7 @@ static void compute_rewards(Drive *env, int i) {
         agent->metrics_array[MULTI_LANE_TIME_IDX] = ml_time;
         agent->metrics_array[MULTI_LANE_SCORE_IDX] = ml_score;
 
-        if (env->reward_type != REWARD_TYPE_DRIVEZERO) {
+        if (!is_drivezero_reward_type(env->reward_type)) {
             compute_agent_ttc(env, agent_idx);
         }
         if (agent->metrics_array[COLLISION_IDX] > 0.0f) {
@@ -4805,7 +4900,7 @@ void c_step(Drive *env) {
         if (env->goal_regen_mode == GOAL_REGEN_ROLLING) {
             regen = !roll_goals(env, agent);
         } else if (agent->current_goal_idx == agent->goal_count) {
-            if (env->reward_type == REWARD_TYPE_DRIVEZERO) {
+            if (is_drivezero_reward_type(env->reward_type)) {
                 continue;
             }
             regen = true;

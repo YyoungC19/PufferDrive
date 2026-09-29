@@ -255,6 +255,7 @@ static const int ROAD_OFFSETS[25][2]
 
 #define REWARD_TYPE_PUFFER 0
 #define REWARD_TYPE_DRIVEZERO 1
+#define REWARD_TYPE_DRIVEZERO_PROGRESS 2
 
 // DriveZero reward protocol (arXiv:2609.06055).
 #define DRIVEZERO_GOAL_REWARD 0.5f
@@ -262,6 +263,10 @@ static const int ROAD_OFFSETS[25][2]
 #define DRIVEZERO_OFFROAD_PENALTY 2.0f
 #define DRIVEZERO_SOFT_NORMALIZER 110.0f
 #define DRIVEZERO_MAX_OVERSPEED 2.23f
+
+// CaRL route completion uses a three-waypoint forward window and percentage units.
+#define CARL_ROUTE_WINDOW_SIZE 2
+#define CARL_ROUTE_COMPLETION_SCALE 100.0f
 
 // Six nuPlan-derived comfort checks used by CaRL's released training recipe.
 #define DRIVEZERO_MAX_ABS_LON_JERK 30.0f

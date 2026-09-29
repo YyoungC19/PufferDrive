@@ -78,6 +78,12 @@ struct Agent {
     int *route;
     int route_gt_len;      // Number of leading route lanes supported by GT before extension
     int current_route_idx; // Tracks progress through route array
+    int carl_route_start_idx;
+    int carl_route_progress_idx;
+    float carl_route_start_progress;
+    float carl_route_total_distance;
+    float carl_route_completed_distance;
+    float carl_last_route_completion;
     float drivezero_prev_yaw_rate;
     int drivezero_has_prev_yaw_rate;
 

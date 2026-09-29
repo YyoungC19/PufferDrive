@@ -165,6 +165,7 @@ class GoalSource(Enum):
 class RewardType(Enum):
     puffer = 0
     drivezero = 1
+    drivezero_progress = 2
 
 
 class PackageName(Enum):
@@ -572,7 +573,7 @@ def _validate_cross_field_constraints(config, context):
         _raise_config_error(context, "env.init_step_min_horizon", "must be smaller than env.scenario_length")
     if env["goal_source"] == "gt" and env["simulation_mode"] != "replay":
         _raise_config_error(context, "env.goal_source", "'gt' is only supported in replay mode")
-    if env["reward_type"] == "drivezero":
+    if env["reward_type"] in ("drivezero", "drivezero_progress"):
         if env["goal_source"] != "route":
             _raise_config_error(context, "env.goal_source", "DriveZero reward requires 'route'")
         if env["num_goals"] != 2:
